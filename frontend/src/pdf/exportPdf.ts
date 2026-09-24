@@ -14,6 +14,14 @@ import {
   rgb,
   setFillingColor,
 } from 'pdf-lib'
+import {
+  setCharacterSpacing,
+  setCharacterSqueeze,
+  setTextRenderingMode,
+  setTextRise,
+  setWordSpacing,
+  TextRenderingMode,
+} from 'pdf-lib/cjs/api/operators.js'
 import type { PdfPoint, PdfRect } from './coordinates.ts'
 import { arrowGeometry, boundsFromPoints, type DrawingAnnotation } from './drawings.ts'
 import { intersectPdfRects, paintRectsFor, type TextMarkup } from './highlights.ts'
@@ -162,6 +170,14 @@ function applyTextEdit(
   page.pushOperators(
     pushGraphicsState(),
     concatTransformationMatrix((a / fontSize) * fit, (b / fontSize) * fit, c / fontSize, d / fontSize, e, f),
+    // The page's previous text state is still in effect inside this save.
+    // Fill-and-stroke mode, leftover character spacing, or a non-100% Tz
+    // would draw the same standard font heavier or wider than the original.
+    setTextRenderingMode(TextRenderingMode.Fill),
+    setCharacterSpacing(0),
+    setWordSpacing(0),
+    setCharacterSqueeze(100),
+    setTextRise(0),
   )
   page.drawText(text, {
     x: 0,

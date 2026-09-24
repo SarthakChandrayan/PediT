@@ -100,7 +100,7 @@ export function Toolbar({
 
   return (
     <header className="toolbar">
-      <div className="toolbar__brand">PDFForge</div>
+      <div className="toolbar__brand">PediT</div>
       <button type="button" className="button button--primary" onClick={onUpload}>
         Upload PDF
       </button>

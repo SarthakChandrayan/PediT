@@ -36,7 +36,7 @@ app.get('/health/db', async (_request, response) => {
 })
 
 app.listen(port, 'localhost', () => {
-  console.log(`PDFForge backend listening on http://localhost:${port}`)
+  console.log(`PediT backend listening on http://localhost:${port}`)
 })
 
 function readPort(value: string | undefined): number {

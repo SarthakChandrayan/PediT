@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib'
+import { setTextRenderingMode, TextRenderingMode } from 'pdf-lib/cjs/api/operators.js'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { describe, expect, it } from 'vitest'
@@ -116,6 +117,24 @@ describe('text appearance', () => {
     expect(resolveStandardFont(edit.appearance)).toBe(StandardFonts.HelveticaBold)
     const exported = await exportEditedPdf(copyBuffer(source.bytes), [edit])
     expect(await fontNameFor(exported, 'Strong')).toBe('Helvetica-Bold')
+  })
+
+  it('keeps a regular face regular and draws it fill-only', async () => {
+    const doc = await PDFDocument.create()
+    const font = await doc.embedFont(StandardFonts.Helvetica)
+    const page = doc.addPage([612, 792])
+    page.drawText('Hello', { x: 72, y: 700, size: 12, font, color: rgb(0, 0, 0) })
+    page.pushOperators(setTextRenderingMode(TextRenderingMode.FillAndOutline))
+    const bytes = await doc.save()
+
+    const edit = await editOf(bytes, 'Hello', 'Hello')
+    expect(edit.appearance?.pdfFontName).toMatch(/Helvetica/)
+    expect(edit.appearance?.bold).toBe(false)
+    expect(resolveStandardFont(edit.appearance)).toBe(StandardFonts.Helvetica)
+
+    const exported = await exportEditedPdf(copyBuffer(bytes), [edit])
+    expect(await fontNameFor(exported, 'Hello')).toBe('Helvetica')
+    expect(await lastTextRenderingMode(exported)).toBe(0)
   })
 
   it('maps detectable italic text to an italic standard font', async () => {
@@ -423,6 +442,31 @@ function copyBuffer(bytes: Uint8Array): ArrayBuffer {
   const copy = new ArrayBuffer(bytes.byteLength)
   new Uint8Array(copy).set(bytes)
   return copy
+}
+
+async function lastTextRenderingMode(bytes: Uint8Array): Promise<number | undefined> {
+  const pdf = await openPdf(bytes)
+  try {
+    const page = await pdf.getPage(1)
+    const ops = await page.getOperatorList()
+    let mode = 0
+    let last: number | undefined
+    for (let index = 0; index < ops.fnArray.length; index += 1) {
+      const fn = ops.fnArray[index]
+      if (fn === pdfTextOperators.setTextRenderingMode) {
+        const value = ops.argsArray[index]?.[0]
+        if (typeof value === 'number') {
+          mode = value
+        }
+      }
+      if (fn === pdfTextOperators.showText || fn === pdfTextOperators.showSpacedText) {
+        last = mode
+      }
+    }
+    return last
+  } finally {
+    await pdf.destroy()
+  }
 }
 
 async function openPdf(bytes: Uint8Array): Promise<PDFDocumentProxy> {
