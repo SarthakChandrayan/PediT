@@ -10,6 +10,7 @@ import {
 import { DrawingLayer } from './DrawingLayer.tsx'
 import { ImageLayer } from './ImageLayer.tsx'
 import { HighlightLayer } from './HighlightLayer.tsx'
+import { SearchHighlightLayer } from './SearchHighlightLayer.tsx'
 import { TextLayer } from './TextLayer.tsx'
 
 type PdfPageProps = {
@@ -155,6 +156,7 @@ export function PdfPage({
         {frame ? (
           <>
             <HighlightLayer pageNumber={pageNumber} viewport={frame.viewport} />
+            <SearchHighlightLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <DrawingLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <ImageLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <TextLayer

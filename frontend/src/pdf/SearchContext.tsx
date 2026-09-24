@@ -110,11 +110,15 @@ export function SearchProvider({
         setModel((current) => clearSearch(current))
       },
       next() {
-        setModel((current) => stepSearch(current, matches.length, 1))
+        setModel((current) =>
+          stepSearch({ ...current, currentMatchIndex }, matches.length, 1),
+        )
         bumpNavigation()
       },
       previous() {
-        setModel((current) => stepSearch(current, matches.length, -1))
+        setModel((current) =>
+          stepSearch({ ...current, currentMatchIndex }, matches.length, -1),
+        )
         bumpNavigation()
       },
       selectMatch(index: number) {
@@ -144,6 +148,8 @@ export function SearchProvider({
   return <SearchContext.Provider value={api}>{children}</SearchContext.Provider>
 }
 
+// The provider and this hook share one context module.
+// eslint-disable-next-line react-refresh/only-export-components
 export function useSearch(): SearchApi {
   const search = useContext(SearchContext)
   if (!search) {

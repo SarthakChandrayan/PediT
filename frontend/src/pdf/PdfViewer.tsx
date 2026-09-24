@@ -9,6 +9,7 @@ import {
 } from 'react'
 import {
   pageSizeFromViewport,
+  pdfRectToViewportBox,
   viewportPointToPdf,
   type PageGeometry,
   type PdfPoint,
@@ -32,7 +33,18 @@ import {
   type TextHighlight,
   type TextMarkup,
 } from './highlights.ts'
+import {
+  clampPageNumber,
+  fitPageScale,
+  fitWidthScale,
+  VIEWER_FIT_INSET_X,
+  VIEWER_FIT_INSET_Y,
+} from './pageNavigation.ts'
 import { PdfPage } from './PdfPage.tsx'
+import { ThumbnailSidebar } from './ThumbnailSidebar.tsx'
+import { PixelsPerInch } from './pdfjs.ts'
+import { useSearch } from './SearchContext.tsx'
+import { extractSearchDocument, type SearchMatch } from './search.ts'
 import { collectSelectedPieces } from './textSelection.ts'
 import { TextEditorContext, type TextEditorApi } from './TextEditorContext.tsx'
 import {
@@ -105,6 +117,10 @@ export type PdfViewerHandle = {
   setDrawingTool: (tool: DrawingKind) => void
   /** Inserted images in PDF user space. The PDF bytes are unchanged. */
   getImages: () => readonly ImageAnnotation[]
+  /** Viewer zoom that fits the current page. Does not change the PDF or history. */
+  fitScale: (mode: 'width' | 'page') => number | null
+  /** Scrolls to a page. Does not change the PDF or history. */
+  jumpToPage: (pageNumber: number) => void
   /** Places a local PNG or JPEG on a page. The file is not uploaded. */
   insertImage: (
     pageNumber: number,
@@ -121,6 +137,7 @@ type PdfViewerProps = {
   ref?: Ref<PdfViewerHandle>
   data: Uint8Array
   scale: number
+  currentPage?: number
   /** 1-based page to show when a new PDF document loads. */
   focusPage?: number
   onPageCountChange?: (pageCount: number) => void
@@ -133,6 +150,7 @@ export function PdfViewer({
   ref,
   data,
   scale,
+  currentPage = 1,
   focusPage = 1,
   onPageCountChange,
   onCurrentPageChange,
@@ -140,6 +158,7 @@ export function PdfViewer({
   onAnnotationStateChange,
 }: PdfViewerProps) {
   const history = useDocumentHistory()
+  const search = useSearch()
   const historyRef = useRef(history)
   const view = history.view
   const pdf = usePdfDocument(data)
@@ -150,6 +169,8 @@ export function PdfViewer({
   const onTextEditsChangeRef = useRef(onTextEditsChange)
   const onAnnotationStateChangeRef = useRef(onAnnotationStateChange)
   const focusPageRef = useRef(focusPage)
+  const currentPageRef = useRef(currentPage)
+  const jumpToPageRef = useRef<(pageNumber: number) => void>(() => undefined)
   const pendingFocusRef = useRef(false)
   const [active, setActive] = useState<ActiveTextEdit | null>(null)
   const [canHighlight, setCanHighlight] = useState(false)
@@ -161,6 +182,9 @@ export function PdfViewer({
   const pageCountRef = useRef(0)
   const runsRef = useRef(new Map<string, HighlightRunRecord>())
   const capturedSelectionRef = useRef<SelectedTextPiece[] | null>(null)
+  const setSearchPagesRef = useRef(search.setPages)
+  const setLiveEditRef = useRef(search.setLiveEdit)
+  const pendingSearchScrollRef = useRef<SearchMatch | null>(null)
   const [trackedDocument, setTrackedDocument] = useState({
     data,
     restoreId: history.restoreId,
@@ -211,6 +235,10 @@ export function PdfViewer({
   }, [focusPage])
 
   useEffect(() => {
+    currentPageRef.current = currentPage
+  }, [currentPage])
+
+  useEffect(() => {
     onPageCountChangeRef.current = onPageCountChange
     onCurrentPageChangeRef.current = onCurrentPageChange
     onTextEditsChangeRef.current = onTextEditsChange
@@ -222,6 +250,42 @@ export function PdfViewer({
     capturedSelectionRef.current = null
     window.getSelection()?.removeAllRanges()
   }, [data])
+
+  useEffect(() => {
+    setSearchPagesRef.current = search.setPages
+    setLiveEditRef.current = search.setLiveEdit
+  })
+
+  useEffect(() => {
+    const pdfDocument = pdf.document
+    if (!pdfDocument) {
+      setSearchPagesRef.current([])
+      return
+    }
+    let cancelled = false
+    void extractSearchDocument(pdfDocument)
+      .then((pages) => {
+        if (!cancelled) {
+          setSearchPagesRef.current(pages)
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          console.error(error)
+          setSearchPagesRef.current([])
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [pdf.document])
+
+  useEffect(() => {
+    const editing = shownActive
+    setLiveEditRef.current(
+      editing ? { id: editing.id, text: editing.draft } : null,
+    )
+  }, [shownActive])
 
   useEffect(() => {
     onAnnotationStateChangeRef.current?.({
@@ -263,8 +327,48 @@ export function PdfViewer({
     onTextEditsChangeRef.current?.(view.edits)
   }, [view.edits])
 
+  const scrollMatchIntoView = useCallback((match: SearchMatch) => {
+    const rect = match.pdfRects[0]
+    const geometry = pagesRef.current.get(match.pageNumber)
+    const root = scrollerRef.current
+    if (!rect || !geometry || !root) {
+      pendingSearchScrollRef.current = match
+      return
+    }
+    pendingSearchScrollRef.current = null
+    const box = pdfRectToViewportBox(geometry.viewport, rect)
+    const rootRect = root.getBoundingClientRect()
+    const pageRect = geometry.element.getBoundingClientRect()
+    const matchTop = pageRect.top + box.top
+    const matchLeft = pageRect.left + box.left
+    const nextTop =
+      root.scrollTop + (matchTop - rootRect.top) - root.clientHeight / 2 + box.height / 2
+    const nextLeft =
+      root.scrollLeft + (matchLeft - rootRect.left) - root.clientWidth / 2 + box.width / 2
+    root.scrollTo({
+      top: Math.max(0, nextTop),
+      left: Math.max(0, nextLeft),
+    })
+    onCurrentPageChangeRef.current?.(match.pageNumber)
+  }, [])
+
+  useEffect(() => {
+    if (!search.open || search.navigationToken === 0) {
+      return
+    }
+    const match = search.currentMatch
+    if (!match) {
+      return
+    }
+    scrollMatchIntoView(match)
+  }, [scrollMatchIntoView, search.currentMatch, search.navigationToken, search.open])
+
   const registerGeometry = useCallback((geometry: PageGeometry) => {
     pagesRef.current.set(geometry.pageNumber, geometry)
+    const pendingMatch = pendingSearchScrollRef.current
+    if (pendingMatch?.pageNumber === geometry.pageNumber) {
+      scrollMatchIntoView(pendingMatch)
+    }
     if (!pendingFocusRef.current || geometry.pageNumber !== focusPageRef.current) {
       return
     }
@@ -277,7 +381,7 @@ export function PdfViewer({
     const rootTop = root.getBoundingClientRect().top
     const targetTop = geometry.element.getBoundingClientRect().top
     root.scrollTop += targetTop - rootTop
-  }, [])
+  }, [scrollMatchIntoView])
 
   const unregisterGeometry = useCallback((pageNumber: number) => {
     pagesRef.current.delete(pageNumber)
@@ -615,6 +719,30 @@ export function PdfViewer({
       getImages() {
         return historyRef.current.getView().images
       },
+      fitScale(mode: 'width' | 'page') {
+        const root = scrollerRef.current
+        const geometry = pagesRef.current.get(currentPageRef.current)
+        if (!root || !geometry) {
+          return null
+        }
+        const page = pageSizeFromViewport(geometry.viewport)
+        const availableWidth = root.clientWidth - VIEWER_FIT_INSET_X
+        const availableHeight = root.clientHeight - VIEWER_FIT_INSET_Y
+        const cssPixelsPerPoint = PixelsPerInch.PDF_TO_CSS_UNITS
+        if (mode === 'width') {
+          return fitWidthScale(page.width, availableWidth, cssPixelsPerPoint)
+        }
+        return fitPageScale(
+          page.width,
+          page.height,
+          availableWidth,
+          availableHeight,
+          cssPixelsPerPoint,
+        )
+      },
+      jumpToPage(pageNumber: number) {
+        jumpToPageRef.current(pageNumber)
+      },
       insertImage(pageNumber, image) {
         const count = pageCountRef.current
         const page = count > 0 ? Math.min(Math.max(pageNumber, 1), count) : pageNumber
@@ -712,11 +840,42 @@ export function PdfViewer({
 
   const pdfDocument = pdf.document
 
+  const jumpToPage = useCallback((pageNumber: number) => {
+    const count = pageCountRef.current
+    if (count < 1) {
+      return
+    }
+    const page = clampPageNumber(pageNumber, count)
+    pendingFocusRef.current = false
+    currentPageRef.current = page
+    onCurrentPageChangeRef.current?.(page)
+    const root = scrollerRef.current
+    const element = root?.querySelector<HTMLElement>(`[data-page-number="${page}"]`)
+    if (!root || !element) {
+      return
+    }
+    const rootTop = root.getBoundingClientRect().top
+    const targetTop = element.getBoundingClientRect().top
+    root.scrollTop += targetTop - rootTop
+  }, [])
+
+  useEffect(() => {
+    jumpToPageRef.current = jumpToPage
+  })
+
   return (
     <TextEditorContext.Provider value={editorApi}>
       <HighlightContext.Provider value={highlightApi}>
       <DrawingContext.Provider value={drawingApi}>
       <ImageContext.Provider value={imageApi}>
+      <div className="pdf-stage">
+      {pdfDocument ? (
+        <ThumbnailSidebar
+          pdf={pdfDocument}
+          currentPage={clampPageNumber(currentPage, pdfDocument.numPages)}
+          onSelectPage={jumpToPage}
+        />
+      ) : null}
       <div
         ref={scrollerRef}
         className="pdf-viewer"
@@ -750,6 +909,7 @@ export function PdfViewer({
           })}
         </div>
       ) : null}
+      </div>
       </div>
       </ImageContext.Provider>
       </DrawingContext.Provider>

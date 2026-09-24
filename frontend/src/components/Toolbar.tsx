@@ -1,3 +1,6 @@
+import { useState } from 'react'
+import { parsePageJump } from '../pdf/pageNavigation.ts'
+import { SearchControls } from './SearchControls.tsx'
 import type { DrawingKind } from '../pdf/drawings.ts'
 import {
   HIGHLIGHT_COLORS,
@@ -20,6 +23,9 @@ type ToolbarProps = {
   onUpload: () => void
   onZoomIn: () => void
   onZoomOut: () => void
+  onFitWidth: () => void
+  onFitPage: () => void
+  onJumpToPage: (pageNumber: number) => void
   onExport: () => void
   onSave: () => void
   canUndo: boolean
@@ -61,6 +67,9 @@ export function Toolbar({
   onUpload,
   onZoomIn,
   onZoomOut,
+  onFitWidth,
+  onFitPage,
+  onJumpToPage,
   onExport,
   onSave,
   canUndo,
@@ -88,9 +97,6 @@ export function Toolbar({
 }: ToolbarProps) {
   const zoomPercent = Math.round(scale * 100)
   const hasDocument = pageCount > 0
-  const pageLabel = hasDocument
-    ? `${Math.max(currentPage, 1)} / ${pageCount}`
-    : '— / —'
 
   return (
     <header className="toolbar">
@@ -102,6 +108,7 @@ export function Toolbar({
         {fileName ?? 'No PDF open'}
       </p>
       <div className="toolbar__controls">
+        <SearchControls disabled={!hasDocument} />
         <div className="toolbar__history" aria-label="History">
           <button
             type="button"
@@ -160,11 +167,29 @@ export function Toolbar({
           >
             +
           </button>
+          <button
+            type="button"
+            className="button button--toolbar"
+            onClick={onFitWidth}
+            disabled={!hasDocument}
+          >
+            Fit width
+          </button>
+          <button
+            type="button"
+            className="button button--toolbar"
+            onClick={onFitPage}
+            disabled={!hasDocument}
+          >
+            Fit page
+          </button>
         </div>
-        <p className="toolbar__pages" aria-live="polite">
-          <span className="sr-only">Current page</span>
-          {pageLabel}
-        </p>
+        <PageJump
+          currentPage={currentPage}
+          pageCount={pageCount}
+          disabled={!hasDocument}
+          onJumpToPage={onJumpToPage}
+        />
         <div className="toolbar__highlights" aria-label="Text highlighting">
           {(Object.keys(HIGHLIGHT_COLORS) as HighlightColorName[]).map((color) => (
             <button
@@ -316,5 +341,67 @@ export function Toolbar({
         </div>
       </div>
     </header>
+  )
+}
+
+function PageJump({
+  currentPage,
+  pageCount,
+  disabled,
+  onJumpToPage,
+}: {
+  currentPage: number
+  pageCount: number
+  disabled: boolean
+  onJumpToPage: (pageNumber: number) => void
+}) {
+  const shown = pageCount > 0 ? String(Math.max(currentPage, 1)) : ''
+  const [draft, setDraft] = useState(shown)
+  const [editing, setEditing] = useState(false)
+  const [draftSource, setDraftSource] = useState(shown)
+
+  if (!editing && draftSource !== shown) {
+    setDraftSource(shown)
+    setDraft(shown)
+  }
+
+  function commit() {
+    setEditing(false)
+    const page = parsePageJump(draft, pageCount)
+    if (page === null) {
+      setDraft(shown)
+      return
+    }
+    if (page !== currentPage) {
+      onJumpToPage(page)
+    }
+  }
+
+  return (
+    <form
+      className="toolbar__page-jump"
+      onSubmit={(event) => {
+        event.preventDefault()
+        commit()
+      }}
+    >
+      <label htmlFor="page-jump">Page</label>
+      <input
+        id="page-jump"
+        className="toolbar__page-input"
+        inputMode="numeric"
+        aria-label="Page number"
+        disabled={disabled}
+        value={draft}
+        onFocus={() => {
+          setEditing(true)
+        }}
+        onChange={(event) => {
+          setDraft(event.target.value)
+        }}
+        onBlur={commit}
+      />
+      <span>of {pageCount > 0 ? pageCount : '—'}</span>
+    </form>
   )
 }

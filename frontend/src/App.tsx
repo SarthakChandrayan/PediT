@@ -3,6 +3,8 @@ import { getDocumentVersionFile, type DocumentVersionRecord } from './api/docume
 import { saveDocumentVersion } from './api/saveDocumentVersion.ts'
 import { uploadDocument } from './api/uploadDocument.ts'
 import { Toolbar } from './components/Toolbar.tsx'
+import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
+import { isFindShortcut, shouldCloseSearchOnEscape } from './pdf/search.ts'
 import { VersionHistory } from './components/VersionHistory.tsx'
 import { DocumentHistoryProvider } from './pdf/DocumentHistoryProvider.tsx'
 import { useDocumentHistory } from './pdf/DocumentHistoryContext.tsx'
@@ -73,6 +75,7 @@ function Editor() {
   resetHistoryRef.current = history.reset
   undoRef.current = history.undo
   redoRef.current = history.redo
+  const [documentSession, setDocumentSession] = useState(0)
   const [highlightColor, setHighlightColor] = useState<HighlightColorName>(
     DEFAULT_HIGHLIGHT_COLOR,
   )
@@ -94,6 +97,7 @@ function Editor() {
         return
       }
       resetHistoryRef.current(loadedSnapshot(restored.bytes))
+      setDocumentSession((current) => current + 1)
       setFocusPage(1)
       setFileName(restored.fileName)
       setDocumentId(restored.documentId)
@@ -203,6 +207,7 @@ function Editor() {
     uploadGeneration.current = generation
     openGeneration.current += 1
     setFocusPage(1)
+    setDocumentSession((current) => current + 1)
     clearStoredDocument()
     setDocumentId(null)
     setCurrentVersion(null)
@@ -324,6 +329,7 @@ function Editor() {
       viewerRef.current?.abandonActiveEdit()
       viewerRef.current?.dismissDrawingDraft()
       resetHistoryRef.current(loadedSnapshot(bytes))
+      setDocumentSession((current) => current + 1)
       setFocusPage(1)
       setCurrentVersion(version.version)
       setVersionFileUrl(version.fileUrl)
@@ -505,6 +511,8 @@ function Editor() {
   }
 
   return (
+    <SearchProvider documentSession={documentSession}>
+    <SearchHotkeys documentOpen={pageCount > 0} />
     <div
       className="app"
       data-document-id={documentId ?? undefined}
@@ -531,6 +539,22 @@ function Editor() {
         onUpload={openFilePicker}
         onZoomIn={() => setScale((current) => stepPdfScale(current, 1))}
         onZoomOut={() => setScale((current) => stepPdfScale(current, -1))}
+        onFitWidth={() => {
+          const next = viewerRef.current?.fitScale('width')
+          if (next != null) {
+            setScale(next)
+          }
+        }}
+        onFitPage={() => {
+          const next = viewerRef.current?.fitScale('page')
+          if (next != null) {
+            setScale(next)
+          }
+        }}
+        onJumpToPage={(page) => {
+          setFocusPage(page)
+          viewerRef.current?.jumpToPage(page)
+        }}
         onSave={() => {
           void handleSave()
         }}
@@ -621,9 +645,13 @@ function Editor() {
             ref={viewerRef}
             data={history.view.pdfBytes}
             scale={scale}
+            currentPage={currentPage}
             focusPage={focusPage}
             onPageCountChange={setPageCount}
-            onCurrentPageChange={setCurrentPage}
+            onCurrentPageChange={(page) => {
+              setCurrentPage(page)
+              setFocusPage(page)
+            }}
             onAnnotationStateChange={setAnnotationUi}
           />
         ) : (
@@ -631,7 +659,41 @@ function Editor() {
         )}
       </main>
     </div>
+    </SearchProvider>
   )
+}
+
+function SearchHotkeys({ documentOpen }: { documentOpen: boolean }) {
+  const search = useSearch()
+  const openRef = useRef(search.openSearch)
+  const closeRef = useRef(search.closeSearch)
+  const openStateRef = useRef(search.open)
+
+  useEffect(() => {
+    openRef.current = search.openSearch
+    closeRef.current = search.closeSearch
+    openStateRef.current = search.open
+  })
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isFindShortcut(event) && (documentOpen || openStateRef.current)) {
+        event.preventDefault()
+        openRef.current()
+        return
+      }
+      if (shouldCloseSearchOnEscape(event, openStateRef.current, event.target)) {
+        event.preventDefault()
+        closeRef.current()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [documentOpen])
+
+  return null
 }
 
 const UNSAVED_VERSION_MESSAGE = 'You have unsaved changes. Open this version anyway?'
