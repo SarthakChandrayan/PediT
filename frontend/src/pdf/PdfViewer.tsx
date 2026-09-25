@@ -94,6 +94,8 @@ export type AnnotationUiState = {
   drawingTool: DrawingKind | null
   textTool: boolean
   selectedNewText: NewTextStyleState | null
+  selectedImage: { width: number; height: number } | null
+  selectedDrawing: boolean
   hasUncommittedEdit: boolean
 }
 
@@ -358,6 +360,8 @@ export function PdfViewer({
       shownTextDraft ??
       createdTexts.find((item) => item.id === selectedTextId) ??
       null
+    const selectedImage =
+      insertedImages.find((item) => item.id === selectedImageId) ?? null
     onAnnotationStateChangeRef.current?.({
       canHighlight,
       canRemoveHighlight:
@@ -376,6 +380,10 @@ export function PdfViewer({
             color: selectedCreated.color,
           }
         : null,
+      selectedImage: selectedImage
+        ? { width: selectedImage.width, height: selectedImage.height }
+        : null,
+      selectedDrawing: selectedDrawingId !== null,
       hasUncommittedEdit:
         (shownActive !== null && shownActive.draft !== shownActive.originalText) ||
         (shownTextDraft !== null && shownTextDraft.text.trim().length > 0) ||
@@ -384,6 +392,7 @@ export function PdfViewer({
   }, [
     canHighlight,
     createdTexts,
+    insertedImages,
     selectedDrawingId,
     selectedHighlightId,
     selectedImageId,
@@ -1281,7 +1290,10 @@ export function PdfViewer({
       ) : null}
 
       {!pdfDocument && !pdf.errorMessage ? (
-        <p className="viewer-status">Opening PDF…</p>
+        <div className="viewer-status" role="status">
+          <span className="spinner" aria-hidden="true" />
+          Opening PDF…
+        </div>
       ) : null}
 
       {pdfDocument ? (

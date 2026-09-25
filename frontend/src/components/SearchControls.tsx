@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { useSearch } from '../pdf/SearchContext.tsx'
+import { Icon } from './icons.tsx'
 
 export function SearchControls({ disabled }: { disabled: boolean }) {
   const search = useSearch()
@@ -21,12 +22,14 @@ export function SearchControls({ disabled }: { disabled: boolean }) {
     return (
       <button
         type="button"
-        className="button button--toolbar"
+        className="tool"
         onClick={search.openSearch}
         disabled={disabled}
+        aria-label="Find in document"
+        data-tooltip="Find"
         aria-keyshortcuts="Control+F Meta+F"
       >
-        Find
+        <Icon name="search" />
       </button>
     )
   }
@@ -35,13 +38,14 @@ export function SearchControls({ disabled }: { disabled: boolean }) {
   const countLabel = search.query.length === 0 ? '' : `${total === 0 ? 0 : search.currentMatchIndex + 1} of ${total}`
 
   return (
-    <div className="toolbar__search" role="search">
+    <div className="search-panel" role="search">
       <input
         ref={inputRef}
         type="search"
-        className="toolbar__search-input"
+        className="search-panel__input"
         value={search.query}
         aria-label="Find in document"
+        placeholder="Find"
         onChange={(event) => {
           search.setQuery(event.target.value)
         }}
@@ -52,45 +56,51 @@ export function SearchControls({ disabled }: { disabled: boolean }) {
           }
         }}
       />
-      <span className="toolbar__search-count" aria-live="polite">
+      <span className="search-panel__count" aria-live="polite">
         {countLabel}
       </span>
       <button
         type="button"
-        className="button button--toolbar"
+        className="tool"
         onClick={search.previous}
         disabled={total === 0}
         aria-label="Previous match"
+        data-tooltip="Previous match"
       >
-        Prev
+        <Icon name="previous" />
       </button>
       <button
         type="button"
-        className="button button--toolbar"
+        className="tool"
         onClick={search.next}
         disabled={total === 0}
         aria-label="Next match"
+        data-tooltip="Next match"
       >
-        Next
+        <Icon name="next" />
       </button>
       <button
         type="button"
-        className="button button--toolbar"
+        className="tool tool--labeled"
         aria-pressed={search.caseSensitive}
         aria-label="Case sensitive"
+        data-tooltip="Case sensitive"
         onClick={() => {
           search.setCaseSensitive(!search.caseSensitive)
         }}
       >
-        Aa
+        <span className="tool__text" aria-hidden="true">
+          Aa
+        </span>
       </button>
       <button
         type="button"
-        className="button button--toolbar"
+        className="tool"
         onClick={search.closeSearch}
         aria-label="Close find"
+        data-tooltip="Close find"
       >
-        Close
+        <Icon name="close" />
       </button>
     </div>
   )

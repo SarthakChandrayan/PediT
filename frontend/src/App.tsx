@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { getDocumentVersionFile, type DocumentVersionRecord } from './api/documents.ts'
 import { saveDocumentVersion } from './api/saveDocumentVersion.ts'
 import { uploadDocument } from './api/uploadDocument.ts'
+import { EditorHeader } from './components/EditorHeader.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
 import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
 import { isFindShortcut, shouldCloseSearchOnEscape } from './pdf/search.ts'
@@ -36,6 +37,7 @@ import {
   type PdfViewerHandle,
 } from './pdf/PdfViewer.tsx'
 import { DEFAULT_PDF_SCALE, stepPdfScale } from './pdf/scale.ts'
+import { documentSaveState } from './ui/saveState.ts'
 
 function App() {
   return (
@@ -85,6 +87,8 @@ function Editor() {
     drawingTool: null,
     textTool: false,
     selectedNewText: null,
+    selectedImage: null,
+    selectedDrawing: false,
     hasUncommittedEdit: false,
   })
   const historyDirtyRef = useRef(history.isDirty)
@@ -521,24 +525,100 @@ function Editor() {
       data-current-version={currentVersion ?? undefined}
       data-version-file={versionFileUrl ?? undefined}
     >
-      <Toolbar
+      <EditorHeader
         fileName={fileName}
-        currentPage={currentPage}
-        pageCount={pageCount}
-        scale={scale}
-        exporting={exporting}
-        saving={saving}
+        saveState={documentSaveState({
+          open: fileName !== null,
+          saving,
+          dirty: history.isDirty || annotationUi.hasUncommittedEdit,
+        })}
         canSave={
           documentId !== null &&
           !saving &&
           !pageOpPending &&
           (history.isDirty || annotationUi.hasUncommittedEdit)
         }
+        saving={saving}
+        exporting={exporting}
+        hasDocument={fileName !== null}
+        onOpen={openFilePicker}
+        onSave={() => {
+          void handleSave()
+        }}
+        onExport={() => {
+          void handleExport()
+        }}
+      />
+      <input
+        ref={imageInputRef}
+        className="file-input"
+        type="file"
+        accept="image/png,image/jpeg,.png,.jpg,.jpeg"
+        onChange={(event) => {
+          void handleImageChange(event)
+        }}
+      />
+      <input
+        ref={fileInputRef}
+        className="file-input"
+        type="file"
+        accept="application/pdf,.pdf"
+        onChange={(event) => {
+          void handleFileChange(event)
+        }}
+      />
+      <main className="workspace">
+        <VersionHistory
+          documentId={documentId}
+          currentVersion={currentVersion}
+          refreshKey={versionListRevision}
+          onOpen={(version) => {
+            void handleOpenVersion(version)
+          }}
+        />
+        <div className="workspace__alerts">
+          {openError ? (
+            <p className="banner" role="alert">
+              {openError}
+            </p>
+          ) : null}
+          {uploadError ? (
+            <p className="banner" role="alert">
+              {uploadError}
+            </p>
+          ) : null}
+          {saveError ? (
+            <p className="banner" role="alert">
+              {saveError}
+            </p>
+          ) : null}
+        </div>
+        {fileName ? (
+          <PdfViewer
+            ref={viewerRef}
+            data={history.view.pdfBytes}
+            scale={scale}
+            currentPage={currentPage}
+            focusPage={focusPage}
+            onPageCountChange={setPageCount}
+            onCurrentPageChange={(page) => {
+              setCurrentPage(page)
+              setFocusPage(page)
+            }}
+            onAnnotationStateChange={setAnnotationUi}
+          />
+        ) : (
+          <EmptyState onUpload={openFilePicker} />
+        )}
+      </main>
+      <Toolbar
+        currentPage={currentPage}
+        pageCount={pageCount}
+        scale={scale}
         pageOpsDisabled={pageCount < 1 || pageOpPending || saving || exporting}
         canDeletePage={pageCount > 1}
         canMovePageUp={currentPage > 1}
         canMovePageDown={pageCount > 0 && currentPage > 0 && currentPage < pageCount}
-        onUpload={openFilePicker}
         onZoomIn={() => setScale((current) => stepPdfScale(current, 1))}
         onZoomOut={() => setScale((current) => stepPdfScale(current, -1))}
         onFitWidth={() => {
@@ -557,16 +637,10 @@ function Editor() {
           setFocusPage(page)
           viewerRef.current?.jumpToPage(page)
         }}
-        onSave={() => {
-          void handleSave()
-        }}
         canUndo={history.canUndo && !pageOpPending && !saving}
         canRedo={history.canRedo && !pageOpPending && !saving}
         onUndo={handleUndo}
         onRedo={handleRedo}
-        onExport={() => {
-          void handleExport()
-        }}
         onDeletePage={handleDeletePage}
         onRotatePage={handleRotatePage}
         onDuplicatePage={handleDuplicatePage}
@@ -600,7 +674,18 @@ function Editor() {
         onTextTool={() => {
           viewerRef.current?.setTextTool()
         }}
+        onSelectTool={() => {
+          const tool = annotationUi.drawingTool
+          if (tool) {
+            viewerRef.current?.setDrawingTool(tool)
+          }
+          if (annotationUi.textTool) {
+            viewerRef.current?.setTextTool(false)
+          }
+        }}
         selectedNewText={annotationUi.selectedNewText}
+        selectedImage={annotationUi.selectedImage}
+        selectedDrawing={annotationUi.selectedDrawing}
         onNewTextStyle={(patch) => {
           viewerRef.current?.patchSelectedNewText(patch)
         }}
@@ -608,66 +693,6 @@ function Editor() {
           imageInputRef.current?.click()
         }}
       />
-      <input
-        ref={imageInputRef}
-        className="file-input"
-        type="file"
-        accept="image/png,image/jpeg,.png,.jpg,.jpeg"
-        onChange={(event) => {
-          void handleImageChange(event)
-        }}
-      />
-      <input
-        ref={fileInputRef}
-        className="file-input"
-        type="file"
-        accept="application/pdf,.pdf"
-        onChange={(event) => {
-          void handleFileChange(event)
-        }}
-      />
-      <main className="workspace">
-        <VersionHistory
-          documentId={documentId}
-          currentVersion={currentVersion}
-          refreshKey={versionListRevision}
-          onOpen={(version) => {
-            void handleOpenVersion(version)
-          }}
-        />
-        {openError ? (
-          <p className="banner" role="alert">
-            {openError}
-          </p>
-        ) : null}
-        {uploadError ? (
-          <p className="banner" role="alert">
-            {uploadError}
-          </p>
-        ) : null}
-        {saveError ? (
-          <p className="banner" role="alert">
-            {saveError}
-          </p>
-        ) : null}
-        {fileName ? (
-          <PdfViewer
-            ref={viewerRef}
-            data={history.view.pdfBytes}
-            scale={scale}
-            currentPage={currentPage}
-            focusPage={focusPage}
-            onPageCountChange={setPageCount}
-            onCurrentPageChange={(page) => {
-              setCurrentPage(page)
-              setFocusPage(page)
-            }}
-            onAnnotationStateChange={setAnnotationUi}
-          />
-        ) : (
-          <EmptyState onUpload={openFilePicker} />
-        )}
-      </main>
     </div>
     </SearchProvider>
   )
@@ -901,11 +926,12 @@ function pageOperationErrorMessage(error: unknown): string {
 function EmptyState({ onUpload }: { onUpload: () => void }) {
   return (
     <div className="empty">
-      <div className="empty__card">
-        <h1>Open a PDF</h1>
-        <p>Choose a PDF from this computer to view its pages.</p>
+      <div className="empty__panel">
+        <img className="empty__logo" src="/logo.png" alt="PeDit" />
+        <h1>Open a PDF to get started</h1>
+        <p>Choose a PDF from this computer to view and edit its pages.</p>
         <button type="button" className="button button--primary" onClick={onUpload}>
-          Upload PDF
+          Open PDF
         </button>
       </div>
     </div>

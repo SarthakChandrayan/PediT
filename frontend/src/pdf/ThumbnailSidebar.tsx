@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RenderTask } from 'pdfjs-dist'
+import { Icon } from '../components/icons.tsx'
 import type { PDFDocumentProxy } from './pdfjs.ts'
 import { thumbnailPageNumbers, THUMBNAIL_CSS_WIDTH } from './pageNavigation.ts'
 
@@ -13,6 +14,7 @@ type ThumbnailSidebarProps = {
 
 export function ThumbnailSidebar({ pdf, currentPage, onSelectPage }: ThumbnailSidebarProps) {
   const listRef = useRef<HTMLDivElement>(null)
+  const [collapsed, setCollapsed] = useState(false)
   const pages = thumbnailPageNumbers(pdf.numPages)
 
   useEffect(() => {
@@ -31,22 +33,47 @@ export function ThumbnailSidebar({ pdf, currentPage, onSelectPage }: ThumbnailSi
   }, [currentPage, pdf])
 
   return (
-    <div
-      ref={listRef}
-      className="thumbnails"
-      role="navigation"
-      aria-label="Page thumbnails"
+    <aside
+      className={collapsed ? 'sidebar sidebar--collapsed' : 'sidebar'}
+      data-collapsed={collapsed ? 'true' : 'false'}
     >
-      {pages.map((pageNumber) => (
-        <Thumbnail
-          key={`${pdf.fingerprints?.[0] ?? 'pdf'}:${pageNumber}`}
-          pdf={pdf}
-          pageNumber={pageNumber}
-          selected={pageNumber === currentPage}
-          onSelectPage={onSelectPage}
-        />
-      ))}
-    </div>
+      <div className="sidebar__header">
+        {collapsed ? null : (
+          <div className="sidebar__title">
+            <h2>Pages</h2>
+            <span className="sidebar__count">{pdf.numPages}</span>
+          </div>
+        )}
+        <button
+          type="button"
+          className="sidebar__toggle"
+          aria-label={collapsed ? 'Expand page sidebar' : 'Collapse page sidebar'}
+          aria-expanded={!collapsed}
+          title={collapsed ? 'Show pages' : 'Hide pages'}
+          onClick={() => {
+            setCollapsed((current) => !current)
+          }}
+        >
+          <Icon name={collapsed ? 'expandSidebar' : 'collapseSidebar'} />
+        </button>
+      </div>
+      <div
+        ref={listRef}
+        className="thumbnails"
+        role="navigation"
+        aria-label="Page thumbnails"
+      >
+        {pages.map((pageNumber) => (
+          <Thumbnail
+            key={`${pdf.fingerprints?.[0] ?? 'pdf'}:${pageNumber}`}
+            pdf={pdf}
+            pageNumber={pageNumber}
+            selected={pageNumber === currentPage}
+            onSelectPage={onSelectPage}
+          />
+        ))}
+      </div>
+    </aside>
   )
 }
 
