@@ -848,6 +848,70 @@ p {
   margin: 0;
 }
 
+.auth-panel__info,
+.auth-panel__muted {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  text-align: center;
+}
+
+.auth-panel__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.auth-panel__google {
+  height: 32px;
+  width: 100%;
+}
+
+.auth-panel__divider {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.auth-panel__divider::before,
+.auth-panel__divider::after {
+  content: '';
+  height: 1px;
+  background: var(--border);
+}
+
+.auth-panel__links {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.auth-panel__otp {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.auth-panel__otp-digit {
+  height: 40px;
+  width: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  text-align: center;
+  font-size: var(--font-size-lg);
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-panel__otp-digit:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
 .pdf-page__error,
 .viewer-status {
   color: var(--text-secondary);

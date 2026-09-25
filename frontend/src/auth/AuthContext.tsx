@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { setAccessTokenProvider, setUnauthorizedHandler } from '../api/accessToken.ts'
-import { AuthContext, type AuthContextValue, type AuthStatus } from './auth-context.ts'
-import { authClient, authConfigured } from './client.ts'
+import { AuthContext, type AuthContextValue, type AuthStatus, type SignInResult } from './auth-context.ts'
+import { authClient, authConfigured, emailOtpApi, signInWithGoogle as startGoogleSignIn } from './client.ts'
 
 const OPEN_DOCUMENT_KEY = 'pdfforge.openDocument'
+const EMAIL_NOT_VERIFIED_RE = /email.*(not|isn['’]?t)\s*verified/i
 
 async function readAccessToken(): Promise<string | null> {
   if (!authClient) {
@@ -39,11 +40,49 @@ function isJwt(value: unknown): value is string {
   return typeof value === 'string' && value.split('.').length === 3
 }
 
+function errorMessage(error: { message?: string } | null | undefined, fallback: string): string {
+  return error?.message?.trim() || fallback
+}
+
+function sessionUser(result: Awaited<ReturnType<NonNullable<typeof authClient>['getSession']>>) {
+  const user = result.data?.user
+  if (!result.data?.session || !user?.email) {
+    return null
+  }
+  return user
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>(authConfigured ? 'loading' : 'anonymous')
   const [email, setEmail] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
+
+  function markAuthenticated(nextEmail: string) {
+    setEmail(nextEmail)
+    setStatus('authenticated')
+    setError(null)
+  }
+
+  function markAnonymous() {
+    setEmail(null)
+    setStatus('anonymous')
+  }
+
+  async function refreshSession(): Promise<boolean> {
+    if (!authClient) {
+      markAnonymous()
+      return false
+    }
+    const result = await authClient.getSession()
+    const user = sessionUser(result)
+    if (user && user.emailVerified) {
+      markAuthenticated(user.email)
+      return true
+    }
+    markAnonymous()
+    return false
+  }
 
   useEffect(() => {
     if (!authClient) {
@@ -51,25 +90,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     let cancelled = false
-    void authClient.getSession().then((result) => {
-      if (cancelled) {
-        return
-      }
-      const sessionEmail = result.data?.user?.email
-      if (result.data?.session && sessionEmail) {
-        setEmail(sessionEmail)
-        setStatus('authenticated')
-        return
-      }
-      setEmail(null)
-      setStatus('anonymous')
-    }).catch(() => {
-      if (!cancelled) {
-        setEmail(null)
-        setStatus('anonymous')
-        setError('The sign-in service is unavailable.')
-      }
-    })
+    void authClient
+      .getSession()
+      .then((result) => {
+        if (cancelled) {
+          return
+        }
+        const user = sessionUser(result)
+        if (user && user.emailVerified) {
+          markAuthenticated(user.email)
+          return
+        }
+        markAnonymous()
+      })
+      .catch(() => {
+        if (!cancelled) {
+          markAnonymous()
+          setError('The sign-in service is unavailable.')
+        }
+      })
 
     return () => {
       cancelled = true
@@ -80,8 +119,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccessTokenProvider(readAccessToken)
     setUnauthorizedHandler(() => {
       sessionStorage.removeItem(OPEN_DOCUMENT_KEY)
-      setEmail(null)
-      setStatus('anonymous')
+      markAnonymous()
     })
   } else if (status !== 'loading') {
     setAccessTokenProvider(null)
@@ -95,27 +133,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       email,
       error,
       pending,
-      async signIn(nextEmail, password) {
+      clearError() {
+        setError(null)
+      },
+      async signIn(nextEmail, password): Promise<SignInResult> {
         if (!authClient) {
           setError('Sign-in is not configured.')
-          return
+          return 'failed'
         }
         setPending(true)
         setError(null)
+        const trimmed = nextEmail.trim()
         try {
           const result = await authClient.signIn.email({
-            email: nextEmail.trim(),
+            email: trimmed,
             password,
           })
           if (result.error) {
-            setError(result.error.message || 'Sign-in failed.')
-            return
+            if (EMAIL_NOT_VERIFIED_RE.test(result.error.message || '')) {
+              const otpResult = await emailOtpApi.sendVerificationOtp(trimmed, 'email-verification')
+              if (otpResult.error) {
+                setError(errorMessage(otpResult.error, 'Could not send a verification code.'))
+                return 'failed'
+              }
+              return 'needs-verification'
+            }
+            setError(errorMessage(result.error, 'Sign-in failed.'))
+            return 'failed'
           }
-          const sessionEmail = result.data?.user?.email ?? nextEmail.trim()
-          setEmail(sessionEmail)
-          setStatus('authenticated')
+          const user = result.data?.user
+          if (user && !user.emailVerified) {
+            const otpResult = await emailOtpApi.sendVerificationOtp(trimmed, 'email-verification')
+            if (otpResult.error) {
+              setError(errorMessage(otpResult.error, 'Could not send a verification code.'))
+              return 'failed'
+            }
+            return 'needs-verification'
+          }
+          const sessionEmail = user?.email ?? trimmed
+          markAuthenticated(sessionEmail)
+          return 'authenticated'
         } catch {
           setError('The sign-in service is unavailable.')
+          return 'failed'
         } finally {
           setPending(false)
         }
@@ -123,7 +183,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async signUp(nextEmail, password) {
         if (!authClient) {
           setError('Sign-up is not configured.')
-          return
+          return 'failed'
         }
         setPending(true)
         setError(null)
@@ -135,14 +195,169 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             name: trimmed.split('@')[0] || 'User',
           })
           if (result.error) {
-            setError(result.error.message || 'Sign-up failed.')
-            return
+            setError(errorMessage(result.error, 'Sign-up failed.'))
+            return 'failed'
           }
-          const sessionEmail = result.data?.user?.email ?? trimmed
-          setEmail(sessionEmail)
-          setStatus('authenticated')
+          return 'needs-verification'
         } catch {
           setError('The sign-in service is unavailable.')
+          return 'failed'
+        } finally {
+          setPending(false)
+        }
+      },
+      async verifyEmail(nextEmail, otp, password) {
+        if (!authClient) {
+          setError('Sign-in is not configured.')
+          return false
+        }
+        setPending(true)
+        setError(null)
+        const trimmed = nextEmail.trim()
+        try {
+          const result = await emailOtpApi.verifyEmail(trimmed, otp.trim())
+          if (result.error) {
+            setError(errorMessage(result.error, 'Invalid verification code.'))
+            return false
+          }
+          if (await refreshSession()) {
+            return true
+          }
+          if (password) {
+            const signInResult = await authClient.signIn.email({
+              email: trimmed,
+              password,
+            })
+            if (signInResult.error) {
+              setError(errorMessage(signInResult.error, 'Email verified. Sign in again.'))
+              return false
+            }
+            const sessionEmail = signInResult.data?.user?.email ?? trimmed
+            markAuthenticated(sessionEmail)
+            return true
+          }
+          setError('Email verified. Sign in to continue.')
+          return false
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async resendVerificationOtp(nextEmail) {
+        setPending(true)
+        setError(null)
+        try {
+          const result = await emailOtpApi.sendVerificationOtp(nextEmail.trim(), 'email-verification')
+          if (result.error) {
+            setError(errorMessage(result.error, 'Could not resend the code.'))
+            return false
+          }
+          return true
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async sendSignInOtp(nextEmail) {
+        setPending(true)
+        setError(null)
+        try {
+          const result = await emailOtpApi.sendVerificationOtp(nextEmail.trim(), 'sign-in')
+          if (result.error) {
+            setError(errorMessage(result.error, 'Could not send a sign-in code.'))
+            return false
+          }
+          return true
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async signInWithOtp(nextEmail, otp) {
+        setPending(true)
+        setError(null)
+        const trimmed = nextEmail.trim()
+        try {
+          const result = await emailOtpApi.signInWithOtp(trimmed, otp.trim())
+          if (result.error) {
+            setError(errorMessage(result.error, 'Invalid sign-in code.'))
+            return false
+          }
+          if (!(await refreshSession())) {
+            const sessionEmail =
+              result.data &&
+              typeof result.data === 'object' &&
+              'user' in result.data &&
+              result.data.user &&
+              typeof result.data.user === 'object' &&
+              'email' in result.data.user &&
+              typeof result.data.user.email === 'string'
+                ? result.data.user.email
+                : trimmed
+            markAuthenticated(sessionEmail)
+          }
+          return true
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async requestPasswordReset(nextEmail) {
+        setPending(true)
+        setError(null)
+        try {
+          const result = await emailOtpApi.forgetPassword(nextEmail.trim())
+          if (result.error) {
+            setError(errorMessage(result.error, 'Could not send a reset code.'))
+            return false
+          }
+          return true
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async resetPassword(nextEmail, otp, password) {
+        setPending(true)
+        setError(null)
+        try {
+          const result = await emailOtpApi.resetPassword(nextEmail.trim(), otp.trim(), password)
+          if (result.error) {
+            setError(errorMessage(result.error, 'Could not reset the password.'))
+            return false
+          }
+          return true
+        } catch {
+          setError('The sign-in service is unavailable.')
+          return false
+        } finally {
+          setPending(false)
+        }
+      },
+      async signInWithGoogle() {
+        if (!authClient) {
+          setError('Sign-in is not configured.')
+          return
+        }
+        setPending(true)
+        setError(null)
+        try {
+          const result = await startGoogleSignIn(window.location.origin)
+          if (result.error) {
+            setError(errorMessage(result.error, 'Google sign-in failed.'))
+          }
+        } catch {
+          setError('Google sign-in is unavailable.')
         } finally {
           setPending(false)
         }
@@ -158,8 +373,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setError('Sign-out could not reach the sign-in service.')
         } finally {
           sessionStorage.removeItem(OPEN_DOCUMENT_KEY)
-          setEmail(null)
-          setStatus('anonymous')
+          markAnonymous()
           setPending(false)
         }
       },
