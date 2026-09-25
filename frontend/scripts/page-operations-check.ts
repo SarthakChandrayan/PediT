@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { PDFDocument, StandardFonts, rgb, type PDFPage } from 'pdf-lib'
 import { decodePDFRawStream } from 'pdf-lib/cjs/core/streams/decode.js'
 import { exportEditedPdf } from '../src/pdf/exportPdf.ts'
@@ -176,16 +177,18 @@ async function testCombined(original: Uint8Array): Promise<void> {
 }
 
 async function saveRoundTrip(versionOne: Uint8Array, versionTwo: Uint8Array): Promise<void> {
-  const uploaded = await postPdf('http://localhost:8000/api/documents', versionOne, true)
+  const authorization = await checkAuthorization()
+  const uploaded = await postPdf('http://localhost:8000/api/documents', versionOne, authorization)
   const saved = await postPdf(
     `http://localhost:8000/api/documents/${uploaded.id}/versions`,
     versionTwo,
-    false,
+    authorization,
   )
   check(saved.version === 2, 'save creates version 2')
 
   const response = await fetch(
     `http://localhost:8000/api/documents/${uploaded.id}/versions/2/file`,
+    { headers: { authorization } },
   )
   check(response.ok, 'saved version can be downloaded')
   const stored = new Uint8Array(await response.arrayBuffer())
@@ -198,19 +201,84 @@ async function saveRoundTrip(versionOne: Uint8Array, versionTwo: Uint8Array): Pr
   check(pages[0]?.text.includes('Edited B') === true, 'saved version keeps the text edit')
 }
 
+async function checkAuthorization(): Promise<string> {
+  const env = readFileSync(new URL('../.env', import.meta.url), 'utf8')
+  const match = env.match(/VITE_NEON_AUTH_URL="([^"]+)"/)
+  const authUrl = match?.[1]
+  if (!authUrl) {
+    throw new Error('VITE_NEON_AUTH_URL is not set.')
+  }
+
+  const email = `pages-${Date.now()}@example.com`
+  const signup = await fetch(`${authUrl}/sign-up/email`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      origin: 'http://localhost:5173',
+    },
+    body: JSON.stringify({
+      email,
+      password: 'CheckPass123!',
+      name: 'Pages',
+    }),
+  })
+  if (!signup.ok) {
+    throw new Error(`Sign-up failed (${signup.status})`)
+  }
+
+  const signupBody: unknown = await signup.json()
+  const sessionToken =
+    typeof signupBody === 'object' &&
+    signupBody !== null &&
+    'token' in signupBody &&
+    typeof signupBody.token === 'string'
+      ? signupBody.token
+      : null
+  if (!sessionToken) {
+    throw new Error('Sign-up did not return a session.')
+  }
+
+  const cookie = signup.headers.get('set-cookie')?.split(';')[0] ?? ''
+  const tokenResponse = await fetch(`${authUrl}/token`, {
+    headers: {
+      origin: 'http://localhost:5173',
+      authorization: `Bearer ${sessionToken}`,
+      cookie,
+    },
+  })
+  if (!tokenResponse.ok) {
+    throw new Error(`Session token exchange failed (${tokenResponse.status})`)
+  }
+
+  const tokenBody: unknown = await tokenResponse.json()
+  const jwt =
+    typeof tokenBody === 'object' &&
+    tokenBody !== null &&
+    'token' in tokenBody &&
+    typeof tokenBody.token === 'string'
+      ? tokenBody.token
+      : null
+  if (!jwt) {
+    throw new Error('Session token exchange did not return a token.')
+  }
+
+  return `Bearer ${jwt}`
+}
+
 async function postPdf(
   url: string,
   bytes: Uint8Array,
-  includeEmail: boolean,
+  authorization: string,
 ): Promise<{ id: string; version: number }> {
   const body = new FormData()
   const copy = new Uint8Array(bytes.byteLength)
   copy.set(bytes)
   body.append('file', new File([copy], 'pages.pdf', { type: 'application/pdf' }))
-  if (includeEmail) {
-    body.append('email', 'test@pdfforge.local')
-  }
-  const response = await fetch(url, { method: 'POST', body })
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { authorization },
+    body,
+  })
   if (!response.ok) {
     throw new Error(`Save request failed (${response.status})`)
   }

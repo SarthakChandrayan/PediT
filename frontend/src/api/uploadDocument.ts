@@ -1,6 +1,5 @@
+import { authorizedFetch, SessionExpiredError } from './accessToken.ts'
 import { DOCUMENTS_URL } from './documents.ts'
-
-const DEV_USER_EMAIL = 'test@pdfforge.local'
 
 export type UploadedDocument = {
   id: string
@@ -11,16 +10,18 @@ export type UploadedDocument = {
 export async function uploadDocument(file: File): Promise<UploadedDocument> {
   const body = new FormData()
   body.append('file', file)
-  body.append('email', DEV_USER_EMAIL)
 
   let response: Response
   try {
-    response = await fetch(DOCUMENTS_URL, {
+    response = await authorizedFetch(DOCUMENTS_URL, {
       method: 'POST',
       body,
     })
-  } catch {
-    throw new Error('The server is unavailable. This PDF is still open locally.')
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable. This PDF is still open locally.', { cause: error })
   }
 
   if (response.ok) {

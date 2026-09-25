@@ -1,3 +1,5 @@
+import { authorizedFetch, SessionExpiredError } from './accessToken.ts'
+
 export const DOCUMENTS_URL = 'http://localhost:8000/api/documents'
 
 export type DocumentVersionRecord = {
@@ -12,13 +14,20 @@ export async function getDocumentVersions(
 ): Promise<DocumentVersionRecord[]> {
   let response: Response
   try {
-    response = await fetch(`${DOCUMENTS_URL}/${encodeURIComponent(documentId)}/versions`)
-  } catch {
-    throw new Error('The server is unavailable.')
+    response = await authorizedFetch(`${DOCUMENTS_URL}/${encodeURIComponent(documentId)}/versions`)
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable.', { cause: error })
   }
 
   if (response.status === 404) {
     throw new Error('This document could not be found.')
+  }
+
+  if (response.status === 401) {
+    throw new SessionExpiredError()
   }
 
   if (!response.ok) {
@@ -39,11 +48,14 @@ export async function getDocumentVersionFile(
 ): Promise<Uint8Array> {
   let response: Response
   try {
-    response = await fetch(
+    response = await authorizedFetch(
       `${DOCUMENTS_URL}/${encodeURIComponent(documentId)}/versions/${version}/file`,
     )
-  } catch {
-    throw new Error('The server is unavailable.')
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable.', { cause: error })
   }
 
   if (response.status === 404) {

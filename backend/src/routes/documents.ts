@@ -1,7 +1,8 @@
 import { Prisma } from '@prisma/client'
 import { Router, type ErrorRequestHandler, type RequestHandler } from 'express'
 import multer from 'multer'
-import { prisma } from '../lib/prisma.js'
+import type { DocumentsDb } from '../lib/documentsDb.js'
+import { documentsDb } from '../lib/documentsDb.js'
 import {
   DOCUMENTS_DIRECTORY,
   displayFileName,
@@ -29,7 +30,29 @@ const upload = multer({
   },
 })
 
-export const documentsRouter = Router()
+export function createDocumentsRouter(db: DocumentsDb = documentsDb): Router {
+  const router = Router()
+  router.post('/', receivePdf, (request, response) => {
+    void createDocument(db, request, response)
+  })
+  router.post('/:documentId/versions', receivePdf, (request, response) => {
+    void createDocumentVersion(db, request, response)
+  })
+  router.get('/:documentId/versions/:version/file', (request, response) => {
+    void sendVersionFile(db, request, response)
+  })
+  router.get('/:documentId/versions', (request, response) => {
+    void listVersions(db, request, response)
+  })
+  router.get('/:id/file', (request, response) => {
+    void sendDocumentFile(db, request, response)
+  })
+  router.get('/:id', (request, response) => {
+    void readDocument(db, request, response)
+  })
+  router.use(handleUploadError)
+  return router
+}
 
 const receivePdf: RequestHandler = (request, response, next) => {
   void ensureDocumentsDirectory()
@@ -46,6 +69,7 @@ const receivePdf: RequestHandler = (request, response, next) => {
 }
 
 async function createDocument(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -62,28 +86,20 @@ async function createDocument(
     return
   }
 
-  const email = readEmail(request.body)
-  if (!email) {
+  const ownerId = request.user?.id
+  if (!ownerId) {
     await removeStoredFile(file.path)
-    response.status(400).json({ error: 'A valid email is required.' })
+    response.status(401).json({ error: 'Authentication is required.' })
     return
   }
 
   const fileUrl = storedFileUrl(file.filename)
 
   try {
-    // The Neon driver does not start interactive transactions reliably, so
-    // the user upsert and the document insert are separate statements.
-    const user = await prisma.user.upsert({
-      where: { email },
-      update: {},
-      create: { email },
-    })
-
-    const document = await prisma.document.create({
+    const document = await db.document.create({
       data: {
         name: displayFileName(file.originalname),
-        userId: user.id,
+        userId: ownerId,
         versions: {
           create: {
             version: 1,
@@ -118,6 +134,7 @@ async function createDocument(
 }
 
 async function createDocumentVersion(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -143,8 +160,15 @@ async function createDocumentVersion(
     return
   }
 
-  const document = await prisma.document.findUnique({
-    where: { id: documentId },
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    await removeStoredFile(file.path)
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const document = await db.document.findFirst({
+    where: { id: documentId, userId: ownerId },
     select: { id: true },
   })
   if (!document) {
@@ -156,7 +180,7 @@ async function createDocumentVersion(
   const fileUrl = storedFileUrl(file.filename)
 
   try {
-    const saved = await insertNextVersion(documentId, fileUrl)
+    const saved = await insertNextVersion(db, documentId, fileUrl)
     response.status(201).json({
       id: saved.id,
       documentId: saved.documentId,
@@ -166,7 +190,7 @@ async function createDocumentVersion(
     })
   } catch (error) {
     await removeStoredFile(file.path)
-    if (prismaCode(error) === 'P2003') {
+    if (isPrismaCode(error, 'P2003')) {
       response.status(404).json({ error: 'Document not found.' })
       return
     }
@@ -176,6 +200,7 @@ async function createDocumentVersion(
 }
 
 async function listVersions(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -185,8 +210,14 @@ async function listVersions(
     return
   }
 
-  const document = await prisma.document.findUnique({
-    where: { id: documentId },
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const document = await db.document.findFirst({
+    where: { id: documentId, userId: ownerId },
     select: {
       versions: {
         orderBy: { version: 'desc' },
@@ -208,6 +239,7 @@ async function listVersions(
 }
 
 async function sendVersionFile(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -218,12 +250,17 @@ async function sendVersionFile(
     return
   }
 
-  const version = await prisma.documentVersion.findUnique({
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const version = await db.documentVersion.findFirst({
     where: {
-      documentId_version: {
-        documentId,
-        version: versionNumber,
-      },
+      documentId,
+      version: versionNumber,
+      document: { userId: ownerId },
     },
     include: {
       document: {
@@ -240,6 +277,7 @@ async function sendVersionFile(
 }
 
 async function readDocument(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -249,8 +287,14 @@ async function readDocument(
     return
   }
 
-  const document = await prisma.document.findUnique({
-    where: { id },
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const document = await db.document.findFirst({
+    where: { id, userId: ownerId },
     include: {
       versions: {
         orderBy: { version: 'desc' },
@@ -258,8 +302,8 @@ async function readDocument(
       },
     },
   })
-  const version = document?.versions[0]
-  if (!document || !version) {
+  const version = document?.versions?.[0]
+  if (!document || !version || !document.name || !document.createdAt) {
     response.status(404).json({ error: 'Document not found.' })
     return
   }
@@ -274,6 +318,7 @@ async function readDocument(
 }
 
 async function sendDocumentFile(
+  db: DocumentsDb,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -283,8 +328,14 @@ async function sendDocumentFile(
     return
   }
 
-  const document = await prisma.document.findUnique({
-    where: { id },
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const document = await db.document.findFirst({
+    where: { id, userId: ownerId },
     include: {
       versions: {
         orderBy: { version: 'desc' },
@@ -292,8 +343,8 @@ async function sendDocumentFile(
       },
     },
   })
-  const version = document?.versions[0]
-  if (!document || !version) {
+  const version = document?.versions?.[0]
+  if (!document || !version || !document.name) {
     response.status(404).json({ error: 'Document not found.' })
     return
   }
@@ -317,24 +368,6 @@ const handleUploadError: ErrorRequestHandler = (error, request, response, next) 
   next(error)
 }
 
-function readEmail(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null || !('email' in body)) {
-    return null
-  }
-
-  const value = body.email
-  if (typeof value !== 'string') {
-    return null
-  }
-
-  const email = value.trim().toLowerCase()
-  if (email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return null
-  }
-
-  return email
-}
-
 function routeId(value: string | string[] | undefined): string | null {
   if (typeof value !== 'string' || value.length === 0 || value.includes('/') || value.includes('\\')) {
     return null
@@ -346,16 +379,16 @@ function routeId(value: string | string[] | undefined): string | null {
 const VERSION_INSERT_ATTEMPTS = 8
 
 /** Allocates max(version)+1. A unique conflict means another save won that number, so the insert is retried. */
-async function insertNextVersion(documentId: string, fileUrl: string) {
+async function insertNextVersion(db: DocumentsDb, documentId: string, fileUrl: string) {
   for (let attempt = 0; attempt < VERSION_INSERT_ATTEMPTS; attempt += 1) {
-    const latest = await prisma.documentVersion.aggregate({
+    const latest = await db.documentVersion.aggregate({
       where: { documentId },
       _max: { version: true },
     })
     const nextVersion = (latest._max.version ?? 0) + 1
 
     try {
-      return await prisma.documentVersion.create({
+      return await db.documentVersion.create({
         data: {
           documentId,
           version: nextVersion,
@@ -363,7 +396,7 @@ async function insertNextVersion(documentId: string, fileUrl: string) {
         },
       })
     } catch (error) {
-      const retry = prismaCode(error) === 'P2002' && attempt < VERSION_INSERT_ATTEMPTS - 1
+      const retry = isPrismaCode(error, 'P2002') && attempt < VERSION_INSERT_ATTEMPTS - 1
       if (!retry) {
         throw error
       }
@@ -373,11 +406,8 @@ async function insertNextVersion(documentId: string, fileUrl: string) {
   throw new Error('A version number could not be allocated.')
 }
 
-function prismaCode(error: unknown): string | null {
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    return error.code
-  }
-  return null
+function isPrismaCode(error: unknown, code: string): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === code
 }
 
 function routeVersion(value: string | string[] | undefined): number | null {
@@ -393,10 +423,5 @@ function routeVersion(value: string | string[] | undefined): number | null {
   return version
 }
 
-documentsRouter.post('/', receivePdf, createDocument)
-documentsRouter.post('/:documentId/versions', receivePdf, createDocumentVersion)
-documentsRouter.get('/:documentId/versions/:version/file', sendVersionFile)
-documentsRouter.get('/:documentId/versions', listVersions)
-documentsRouter.get('/:id/file', sendDocumentFile)
-documentsRouter.get('/:id', readDocument)
-documentsRouter.use(handleUploadError)
+export const documentsRouter = createDocumentsRouter()
+

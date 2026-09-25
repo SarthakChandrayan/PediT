@@ -2,6 +2,9 @@ import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { getDocumentVersionFile, type DocumentVersionRecord } from './api/documents.ts'
 import { saveDocumentVersion } from './api/saveDocumentVersion.ts'
 import { uploadDocument } from './api/uploadDocument.ts'
+import { AuthProvider } from './auth/AuthContext.tsx'
+import { useAuth } from './auth/useAuth.ts'
+import { AuthScreen } from './auth/AuthScreen.tsx'
 import { EditorHeader } from './components/EditorHeader.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
 import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
@@ -41,13 +44,37 @@ import { documentSaveState } from './ui/saveState.ts'
 
 function App() {
   return (
+    <AuthProvider>
+      <AuthenticatedApp />
+    </AuthProvider>
+  )
+}
+
+function AuthenticatedApp() {
+  const auth = useAuth()
+  if (!auth.configured || auth.status !== 'authenticated') {
+    return <AuthScreen />
+  }
+
+  return (
     <DocumentHistoryProvider>
-      <Editor />
+      <Editor
+        userEmail={auth.email}
+        onLogout={() => {
+          void auth.signOut()
+        }}
+      />
     </DocumentHistoryProvider>
   )
 }
 
-function Editor() {
+function Editor({
+  userEmail,
+  onLogout,
+}: {
+  userEmail: string | null
+  onLogout: () => void
+}) {
   const history = useDocumentHistory()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -548,6 +575,8 @@ function Editor() {
         onExport={() => {
           void handleExport()
         }}
+        userEmail={userEmail}
+        onLogout={onLogout}
       />
       <input
         ref={imageInputRef}

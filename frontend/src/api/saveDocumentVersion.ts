@@ -1,3 +1,4 @@
+import { authorizedFetch, SessionExpiredError } from './accessToken.ts'
 import { DOCUMENTS_URL } from './documents.ts'
 
 export type SavedDocumentVersion = {
@@ -19,12 +20,15 @@ export async function saveDocumentVersion(
 
   let response: Response
   try {
-    response = await fetch(`${DOCUMENTS_URL}/${encodeURIComponent(documentId)}/versions`, {
+    response = await authorizedFetch(`${DOCUMENTS_URL}/${encodeURIComponent(documentId)}/versions`, {
       method: 'POST',
       body,
     })
-  } catch {
-    throw new Error('The server is unavailable. Your edits are still in the editor.')
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable. Your edits are still in the editor.', { cause: error })
   }
 
   if (response.ok) {
