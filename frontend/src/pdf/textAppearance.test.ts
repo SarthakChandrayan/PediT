@@ -1,5 +1,4 @@
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib'
-import { setTextRenderingMode, TextRenderingMode } from 'pdf-lib/cjs/api/operators.js'
+import { PDFDocument, StandardFonts, rgb, degrees, setTextRenderingMode, TextRenderingMode } from 'pdf-lib'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { describe, expect, it } from 'vitest'
@@ -14,8 +13,11 @@ import {
   metricsFromMatrix,
   pdfTextOperators,
   readPageTextCapture,
+  replacementFontCss,
   resolveStandardFont,
+  samePdfFontName,
 } from './textAppearance.ts'
+import { fontProgramOnPage } from './originalFont.ts'
 import {
   beginTextEdit,
   commitTextEdit,
@@ -54,6 +56,19 @@ describe('text appearance', () => {
     expect(resolveStandardFont(undefined)).toBe(StandardFonts.Helvetica)
     expect(resolveStandardFont(face({ pdfFontName: 'SomeDisplayFont' }))).toBe(
       StandardFonts.Helvetica,
+    )
+    expect(samePdfFontName('EAFJKL+Calibri', 'Calibri')).toBe(true)
+    expect(samePdfFontName('Calibri', 'Calibri-Bold')).toBe(false)
+    expect(
+      replacementFontCss(face({ loadedName: 'g_d0_f1', pdfFontName: 'EAFJKL+Calibri' })),
+    ).toEqual({
+      fontFamily: '"g_d0_f1", Helvetica, Arial, sans-serif',
+    })
+    expect(replacementFontCss(face({ pdfFontName: 'Calibri', bold: false }))).toEqual({
+      fontFamily: 'Helvetica, Arial, sans-serif',
+    })
+    expect(replacementFontCss(face({ pdfFontName: 'Calibri-Bold', bold: true })).fontWeight).toBe(
+      700,
     )
   })
 
@@ -129,12 +144,21 @@ describe('text appearance', () => {
 
     const edit = await editOf(bytes, 'Hello', 'Hello')
     expect(edit.appearance?.pdfFontName).toMatch(/Helvetica/)
+    expect(edit.appearance?.loadedName).toEqual(expect.any(String))
     expect(edit.appearance?.bold).toBe(false)
     expect(resolveStandardFont(edit.appearance)).toBe(StandardFonts.Helvetica)
 
     const exported = await exportEditedPdf(copyBuffer(bytes), [edit])
     expect(await fontNameFor(exported, 'Hello')).toBe('Helvetica')
     expect(await lastTextRenderingMode(exported)).toBe(0)
+  })
+
+  it('does not extract a FontFile from a standard Helvetica page', async () => {
+    const source = await drawPdf((page, font) => {
+      page.drawText('Hello', { x: 48, y: 240, size: 16, font, color: rgb(0, 0, 0) })
+    }, StandardFonts.Helvetica)
+    const pdf = await PDFDocument.load(source.bytes)
+    expect(fontProgramOnPage(pdf.getPage(0), 'Helvetica')).toBeNull()
   })
 
   it('maps detectable italic text to an italic standard font', async () => {

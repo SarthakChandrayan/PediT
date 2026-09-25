@@ -10,6 +10,7 @@ import {
 import { DrawingLayer } from './DrawingLayer.tsx'
 import { ImageLayer } from './ImageLayer.tsx'
 import { HighlightLayer } from './HighlightLayer.tsx'
+import { NewTextLayer } from './NewTextLayer.tsx'
 import { SearchHighlightLayer } from './SearchHighlightLayer.tsx'
 import { TextLayer } from './TextLayer.tsx'
 
@@ -164,6 +165,7 @@ export function PdfPage({
               pageNumber={pageNumber}
               viewport={frame.viewport}
             />
+            <NewTextLayer pageNumber={pageNumber} viewport={frame.viewport} />
           </>
         ) : null}
       </div>

@@ -9,6 +9,11 @@
  */
 export type TextRunAppearance = {
   pdfFontName?: string
+  /**
+   * PDF.js `loadedName`. The viewer registers this as a CSS FontFace, so the
+   * overlay can use the same glyphs as the canvas. Not a substitute font.
+   */
+  loadedName?: string
   fallbackFamily?: 'serif' | 'sans-serif' | 'monospace'
   bold: boolean
   italic: boolean

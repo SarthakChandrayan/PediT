@@ -1,6 +1,7 @@
 import type { DrawingAnnotation } from './drawings.ts'
 import type { TextMarkup } from './highlights.ts'
 import type { ImageAnnotation } from './images.ts'
+import { cloneNewText, type NewTextAnnotation } from './newTexts.ts'
 import type { TextEdit } from './textEdits.ts'
 
 /**
@@ -16,9 +17,11 @@ export type DocumentSnapshot = {
   markups: readonly TextMarkup[]
   drawings: readonly DrawingAnnotation[]
   images: readonly ImageAnnotation[]
+  texts: readonly NewTextAnnotation[]
   selectedMarkupId: string | null
   selectedDrawingId: string | null
   selectedImageId: string | null
+  selectedTextId: string | null
 }
 
 export type HistoryEntry = {
@@ -30,6 +33,7 @@ export type SelectionPatch = {
   selectedMarkupId?: string | null
   selectedDrawingId?: string | null
   selectedImageId?: string | null
+  selectedTextId?: string | null
 }
 
 export type CommitOptions = {
@@ -64,9 +68,11 @@ export function emptyDocumentSnapshot(): DocumentSnapshot {
     markups: [],
     drawings: [],
     images: [],
+    texts: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
+    selectedTextId: null,
   }
 }
 
@@ -98,9 +104,11 @@ export function withPageOperation(pdfBytes: Uint8Array): DocumentSnapshot {
     markups: [],
     drawings: [],
     images: [],
+    texts: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
+    selectedTextId: null,
   }
 }
 
@@ -325,9 +333,11 @@ function cloneSnapshot(snapshot: DocumentSnapshot, copyPdf: boolean): DocumentSn
     markups: snapshot.markups.map(cloneMarkup),
     drawings: snapshot.drawings.map(cloneDrawing),
     images: snapshot.images.map(cloneImage),
+    texts: (snapshot.texts ?? []).map(cloneNewText),
     selectedMarkupId: snapshot.selectedMarkupId,
     selectedDrawingId: snapshot.selectedDrawingId,
     selectedImageId: snapshot.selectedImageId,
+    selectedTextId: snapshot.selectedTextId ?? null,
   }
 }
 
@@ -373,6 +383,8 @@ function applySelection(snapshot: DocumentSnapshot, patch: SelectionPatch): Docu
         : snapshot.selectedDrawingId,
     selectedImageId:
       patch.selectedImageId !== undefined ? patch.selectedImageId : snapshot.selectedImageId,
+    selectedTextId:
+      patch.selectedTextId !== undefined ? patch.selectedTextId : snapshot.selectedTextId,
   }
 }
 
@@ -382,7 +394,8 @@ function selectionChanges(snapshot: DocumentSnapshot, patch: SelectionPatch): bo
       patch.selectedMarkupId !== snapshot.selectedMarkupId) ||
     (patch.selectedDrawingId !== undefined &&
       patch.selectedDrawingId !== snapshot.selectedDrawingId) ||
-    (patch.selectedImageId !== undefined && patch.selectedImageId !== snapshot.selectedImageId)
+    (patch.selectedImageId !== undefined && patch.selectedImageId !== snapshot.selectedImageId) ||
+    (patch.selectedTextId !== undefined && patch.selectedTextId !== snapshot.selectedTextId)
   )
 }
 
@@ -397,7 +410,8 @@ function sameSelection(left: DocumentSnapshot, right: DocumentSnapshot): boolean
   return (
     left.selectedMarkupId === right.selectedMarkupId &&
     left.selectedDrawingId === right.selectedDrawingId &&
-    left.selectedImageId === right.selectedImageId
+    left.selectedImageId === right.selectedImageId &&
+    left.selectedTextId === right.selectedTextId
   )
 }
 
@@ -406,7 +420,8 @@ function sameContent(left: DocumentSnapshot, right: DocumentSnapshot): boolean {
     sameEdits(left.edits, right.edits) &&
     sameMarkups(left.markups, right.markups) &&
     sameDrawings(left.drawings, right.drawings) &&
-    sameImages(left.images, right.images)
+    sameImages(left.images, right.images) &&
+    sameTexts(left.texts, right.texts)
   )
 }
 
@@ -451,6 +466,7 @@ function sameAppearance(
   }
   return (
     left.pdfFontName === right.pdfFontName &&
+    left.loadedName === right.loadedName &&
     left.fallbackFamily === right.fallbackFamily &&
     left.bold === right.bold &&
     left.italic === right.italic &&
@@ -541,6 +557,39 @@ function sameImages(left: readonly ImageAnnotation[], right: readonly ImageAnnot
       a.originalHeight !== b.originalHeight ||
       a.format !== b.format ||
       !sameBytes(a.bytes, b.bytes)
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+function sameTexts(left: readonly NewTextAnnotation[], right: readonly NewTextAnnotation[]): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]
+    const b = right[index]
+    if (!a || !b) {
+      return false
+    }
+    if (
+      a.id !== b.id ||
+      a.pageNumber !== b.pageNumber ||
+      a.text !== b.text ||
+      a.pdfX !== b.pdfX ||
+      a.pdfY !== b.pdfY ||
+      a.width !== b.width ||
+      a.height !== b.height ||
+      a.fontName !== b.fontName ||
+      a.fontSize !== b.fontSize ||
+      a.bold !== b.bold ||
+      a.italic !== b.italic ||
+      a.horizontalScale !== b.horizontalScale ||
+      a.color.r !== b.color.r ||
+      a.color.g !== b.color.g ||
+      a.color.b !== b.color.b
     ) {
       return false
     }

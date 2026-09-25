@@ -3,6 +3,13 @@ import { parsePageJump } from '../pdf/pageNavigation.ts'
 import { SearchControls } from './SearchControls.tsx'
 import type { DrawingKind } from '../pdf/drawings.ts'
 import {
+  hexToRgb,
+  isNewTextFontName,
+  NEW_TEXT_FONTS,
+  rgbToHex,
+  type NewTextAnnotation,
+} from '../pdf/newTexts.ts'
+import {
   HIGHLIGHT_COLORS,
   type HighlightColorName,
 } from '../pdf/highlights.ts'
@@ -49,6 +56,12 @@ type ToolbarProps = {
   onRemoveHighlight: () => void
   drawingTool: DrawingKind | null
   onDrawingTool: (tool: DrawingKind) => void
+  textTool: boolean
+  onTextTool: () => void
+  selectedNewText: Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'> | null
+  onNewTextStyle: (
+    patch: Partial<Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'>>,
+  ) => void
   onInsertImage: () => void
 }
 
@@ -93,6 +106,10 @@ export function Toolbar({
   onRemoveHighlight,
   drawingTool,
   onDrawingTool,
+  textTool,
+  onTextTool,
+  selectedNewText,
+  onNewTextStyle,
   onInsertImage,
 }: ToolbarProps) {
   const zoomPercent = Math.round(scale * 100)
@@ -256,6 +273,15 @@ export function Toolbar({
           </button>
         </div>
         <div className="toolbar__draw" aria-label="Drawing">
+          <button
+            type="button"
+            className="button button--toolbar"
+            aria-pressed={textTool}
+            disabled={pageOpsDisabled}
+            onClick={onTextTool}
+          >
+            Text
+          </button>
           {(
             [
               ['freehand', 'Pen'],
@@ -287,6 +313,81 @@ export function Toolbar({
             Image
           </button>
         </div>
+        {selectedNewText ? (
+          <div className="toolbar__text-style" aria-label="Text style" data-new-text-style="">
+            <label className="toolbar__text-style-label">
+              Font
+              <select
+                className="toolbar__text-select"
+                value={selectedNewText.fontName}
+                onChange={(event) => {
+                  if (isNewTextFontName(event.target.value)) {
+                    onNewTextStyle({ fontName: event.target.value })
+                  }
+                }}
+              >
+                {NEW_TEXT_FONTS.map((font) => (
+                  <option key={font} value={font}>
+                    {font}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="toolbar__text-style-label">
+              Size
+              <select
+                className="toolbar__text-select"
+                value={String(selectedNewText.fontSize)}
+                onChange={(event) => {
+                  const fontSize = Number(event.target.value)
+                  if (Number.isFinite(fontSize)) {
+                    onNewTextStyle({ fontSize })
+                  }
+                }}
+              >
+                {fontSizesFor(selectedNewText.fontSize).map((size) => (
+                  <option key={size} value={size}>
+                    {size}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="button button--toolbar"
+              aria-pressed={selectedNewText.bold}
+              onClick={() => {
+                onNewTextStyle({ bold: !selectedNewText.bold })
+              }}
+            >
+              Bold
+            </button>
+            <button
+              type="button"
+              className="button button--toolbar"
+              aria-pressed={selectedNewText.italic}
+              onClick={() => {
+                onNewTextStyle({ italic: !selectedNewText.italic })
+              }}
+            >
+              Italic
+            </button>
+            <label className="toolbar__text-style-label">
+              Color
+              <input
+                className="toolbar__text-color"
+                type="color"
+                value={rgbToHex(selectedNewText.color)}
+                onChange={(event) => {
+                  const color = hexToRgb(event.target.value)
+                  if (color) {
+                    onNewTextStyle({ color })
+                  }
+                }}
+              />
+            </label>
+          </div>
+        ) : null}
         <div className="toolbar__page-ops" aria-label="Page operations">
           <button
             type="button"
@@ -404,4 +505,13 @@ function PageJump({
       <span>of {pageCount > 0 ? pageCount : '—'}</span>
     </form>
   )
+}
+
+const NEW_TEXT_SIZES = [8, 10, 12, 14, 16, 18, 24, 36, 48, 72]
+
+function fontSizesFor(current: number): number[] {
+  if (NEW_TEXT_SIZES.includes(current)) {
+    return NEW_TEXT_SIZES
+  }
+  return [...NEW_TEXT_SIZES, current].sort((left, right) => left - right)
 }

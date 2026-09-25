@@ -12,20 +12,20 @@ import {
   popGraphicsState,
   pushGraphicsState,
   rgb,
-  setFillingColor,
-} from 'pdf-lib'
-import {
   setCharacterSpacing,
   setCharacterSqueeze,
+  setFillingColor,
   setTextRenderingMode,
   setTextRise,
   setWordSpacing,
   TextRenderingMode,
-} from 'pdf-lib/cjs/api/operators.js'
+} from 'pdf-lib'
 import type { PdfPoint, PdfRect } from './coordinates.ts'
 import { arrowGeometry, boundsFromPoints, type DrawingAnnotation } from './drawings.ts'
 import { intersectPdfRects, paintRectsFor, type TextMarkup } from './highlights.ts'
 import type { ImageAnnotation } from './images.ts'
+import { resolveNewTextFont, type NewTextAnnotation } from './newTexts.ts'
+import { embedOriginalFont } from './originalFont.ts'
 import { horizontalFitFactor, resolveStandardFont } from './textAppearance.ts'
 import type { TextEdit } from './textEdits.ts'
 
@@ -68,12 +68,14 @@ export async function exportEditedPdf(
   highlights: readonly TextMarkup[] = [],
   drawings: readonly DrawingAnnotation[] = [],
   images: readonly ImageAnnotation[] = [],
+  texts: readonly NewTextAnnotation[] = [],
 ): Promise<Uint8Array> {
   if (
     edits.length === 0 &&
     highlights.length === 0 &&
     drawings.length === 0 &&
-    images.length === 0
+    images.length === 0 &&
+    texts.length === 0
   ) {
     return new Uint8Array(originalBytes.slice(0))
   }
@@ -81,6 +83,7 @@ export async function exportEditedPdf(
   const pdf = await PDFDocument.load(originalBytes.slice(0))
   const pages = pdf.getPages()
   const fonts = new Map<StandardFonts, PDFFont>()
+  const originalFonts = new Map<string, PDFFont | null>()
 
   for (let index = 0; index < pages.length; index += 1) {
     const page = pages[index]
@@ -125,11 +128,20 @@ export async function exportEditedPdf(
         `A text edit refers to page ${edit.pageNumber}, which is not in this PDF.`,
       )
     }
+    const original = await embedOriginalFont(
+      pdf,
+      page,
+      edit.appearance?.pdfFontName ?? edit.fontName,
+      originalFonts,
+    )
     const standard = resolveStandardFont(edit.appearance)
-    let font = fonts.get(standard)
+    let font = original
     if (!font) {
-      font = await pdf.embedFont(standard)
-      fonts.set(standard, font)
+      font = fonts.get(standard) ?? null
+      if (!font) {
+        font = await pdf.embedFont(standard)
+        fonts.set(standard, font)
+      }
     }
     applyTextEdit(
       page,
@@ -137,6 +149,22 @@ export async function exportEditedPdf(
       edit,
       highlights.filter((markup) => markup.pageNumber === edit.pageNumber),
     )
+  }
+
+  for (const created of texts) {
+    const page = pages[created.pageNumber - 1]
+    if (!page) {
+      throw new Error(
+        `Created text refers to page ${created.pageNumber}, which is not in this PDF.`,
+      )
+    }
+    const standard = resolveNewTextFont(created)
+    let font = fonts.get(standard) ?? null
+    if (!font) {
+      font = await pdf.embedFont(standard)
+      fonts.set(standard, font)
+    }
+    paintCreatedText(page, font, created)
   }
 
   for (const markup of highlights) {
@@ -187,6 +215,40 @@ function applyTextEdit(
     color: editColor(edit),
   })
   page.pushOperators(popGraphicsState())
+}
+
+function paintCreatedText(page: PDFPage, font: PDFFont, created: NewTextAnnotation): void {
+  const text = textForStandardFont(font, created.text)
+  if (text.length === 0 || !(created.fontSize > 0)) {
+    return
+  }
+  const scale =
+    Number.isFinite(created.horizontalScale) && created.horizontalScale > 0
+      ? created.horizontalScale
+      : 1
+  page.pushOperators(
+    pushGraphicsState(),
+    // Created text is independent of the page's leftover text state.
+    setTextRenderingMode(TextRenderingMode.Fill),
+    setCharacterSpacing(0),
+    setWordSpacing(0),
+    setCharacterSqueeze(100 * scale),
+    setTextRise(0),
+  )
+  page.drawText(text, {
+    x: created.pdfX,
+    y: created.pdfY,
+    size: created.fontSize,
+    font,
+    color: createdTextColor(created),
+  })
+  page.pushOperators(popGraphicsState())
+}
+
+function createdTextColor(created: NewTextAnnotation) {
+  const channel = (value: number) =>
+    Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0
+  return rgb(channel(created.color.r), channel(created.color.g), channel(created.color.b))
 }
 
 /**

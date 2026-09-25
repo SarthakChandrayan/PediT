@@ -72,6 +72,7 @@ export type TextColorSample = {
 
 export type PdfFontRecord = {
   pdfFontName?: string
+  loadedName?: string
   fallbackFamily?: TextRunAppearance['fallbackFamily']
   bold: boolean
   italic: boolean
@@ -238,6 +239,41 @@ export function resolveStandardFont(
   return applyWeight(family, bold, italic)
 }
 
+/**
+ * Overlay CSS for a replacement. Prefer the PDF.js FontFace (`loadedName`) so
+ * the line matches the original canvas glyphs. Only synthesize weight/style
+ * when that face is missing and a standard substitute is used.
+ */
+export function replacementFontCss(
+  appearance: TextRunAppearance | undefined,
+  runFamily?: string,
+): { fontFamily: string; fontWeight?: number; fontStyle?: 'italic' } {
+  const standard = cssFontFamily(resolveStandardFont(appearance))
+  const loaded = appearance?.loadedName?.trim()
+  if (loaded) {
+    return { fontFamily: `"${loaded}", ${standard}` }
+  }
+  const run = runFamily?.trim()
+  if (run && run !== 'sans-serif' && run !== 'serif' && run !== 'monospace') {
+    return { fontFamily: `${run}, ${standard}` }
+  }
+  return {
+    fontFamily: standard,
+    fontWeight: appearance?.bold ? 700 : undefined,
+    fontStyle: appearance?.italic ? 'italic' : undefined,
+  }
+}
+
+export function samePdfFontName(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) {
+    return false
+  }
+  if (left === right) {
+    return true
+  }
+  return normalizePdfFontName(left).toLowerCase() === normalizePdfFontName(right).toLowerCase()
+}
+
 export function cssFontFamily(font: StandardFonts): string {
   if (font.startsWith('Times')) {
     return '"Times New Roman", Times, serif'
@@ -271,6 +307,7 @@ export function appearanceForRun(input: {
     input.font?.fallbackFamily ?? parseFallbackFamily(input.styleFamily)
   return {
     pdfFontName: input.font?.pdfFontName,
+    loadedName: input.font?.loadedName,
     fallbackFamily,
     bold: input.font?.bold === true,
     italic: input.font?.italic === true,
@@ -473,6 +510,7 @@ function readFontRecord(page: PDFPageProxy, fontId: string): PdfFontRecord | nul
   }
   let font: {
     name?: string
+    loadedName?: string
     bold?: boolean
     italic?: boolean
     fallbackName?: string
@@ -489,8 +527,11 @@ function readFontRecord(page: PDFPageProxy, fontId: string): PdfFontRecord | nul
     return null
   }
   const pdfFontName = typeof font.name === 'string' && font.name.length > 0 ? font.name : undefined
+  const loadedName =
+    typeof font.loadedName === 'string' && font.loadedName.length > 0 ? font.loadedName : undefined
   return {
     pdfFontName,
+    loadedName,
     fallbackFamily: parseFallbackFamily(font.fallbackName),
     bold: font.bold === true || (font.bold === undefined && nameIsBold(pdfFontName)),
     italic: font.italic === true || (font.italic === undefined && nameIsItalic(pdfFontName)),

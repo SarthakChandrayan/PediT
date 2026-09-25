@@ -83,6 +83,8 @@ function Editor() {
     canHighlight: false,
     canRemoveHighlight: false,
     drawingTool: null,
+    textTool: false,
+    selectedNewText: null,
     hasUncommittedEdit: false,
   })
   const historyDirtyRef = useRef(history.isDirty)
@@ -594,6 +596,14 @@ function Editor() {
         onDrawingTool={(tool: DrawingKind) => {
           viewerRef.current?.setDrawingTool(tool)
         }}
+        textTool={annotationUi.textTool}
+        onTextTool={() => {
+          viewerRef.current?.setTextTool()
+        }}
+        selectedNewText={annotationUi.selectedNewText}
+        onNewTextStyle={(patch) => {
+          viewerRef.current?.patchSelectedNewText(patch)
+        }}
         onInsertImage={() => {
           imageInputRef.current?.click()
         }}
@@ -706,9 +716,11 @@ function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {
     markups: [],
     drawings: [],
     images: [],
+    texts: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
+    selectedTextId: null,
   }
 }
 
@@ -717,7 +729,8 @@ async function exportSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
     snapshot.edits.length === 0 &&
     snapshot.markups.length === 0 &&
     snapshot.drawings.length === 0 &&
-    snapshot.images.length === 0
+    snapshot.images.length === 0 &&
+    (snapshot.texts?.length ?? 0) === 0
   ) {
     return clonePdfBytes(snapshot.pdfBytes)
   }
@@ -729,6 +742,7 @@ async function exportSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
     snapshot.markups,
     snapshot.drawings,
     snapshot.images,
+    snapshot.texts ?? [],
   )
 }
 

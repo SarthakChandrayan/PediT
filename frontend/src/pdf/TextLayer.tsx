@@ -10,11 +10,10 @@ import type { PageViewport, PDFPageProxy } from 'pdfjs-dist'
 import {
   appearanceForRun,
   cssColor,
-  cssFontFamily,
   horizontalFitFactor,
   matchTextColor,
   readPageTextCapture,
-  resolveStandardFont,
+  replacementFontCss,
   type PdfFontRecord,
   type TextColorSample,
 } from './textAppearance.ts'
@@ -440,16 +439,16 @@ function applyReplacementFit(
 
 function shellStyle(run: LaidOutTextItem, appearance?: TextRunAppearance): CSSProperties {
   const shift = textShift(run)
-  const standard = appearance ? resolveStandardFont(appearance) : null
+  const face = replacementFontCss(appearance, run.fontFamily)
   return {
     ...boxStyle(run),
     height: `${Math.max(run.box.height, shift + run.fontSize)}px`,
     overflow: 'hidden',
     fontSize: `${run.fontSize}px`,
     lineHeight: 1,
-    fontFamily: standard ? cssFontFamily(standard) : fontFamilyOf(run),
-    fontWeight: appearance?.bold ? 700 : undefined,
-    fontStyle: appearance?.italic ? 'italic' : undefined,
+    fontFamily: face.fontFamily,
+    fontWeight: face.fontWeight,
+    fontStyle: face.fontStyle,
     color: appearance?.color ? cssColor(appearance.color) : undefined,
   }
 }

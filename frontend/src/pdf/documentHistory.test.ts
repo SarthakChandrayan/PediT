@@ -507,7 +507,8 @@ async function exportSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
     snapshot.edits.length === 0 &&
     snapshot.markups.length === 0 &&
     snapshot.drawings.length === 0 &&
-    snapshot.images.length === 0
+    snapshot.images.length === 0 &&
+    snapshot.texts.length === 0
   ) {
     const copy = new Uint8Array(snapshot.pdfBytes.byteLength)
     copy.set(snapshot.pdfBytes)
@@ -521,6 +522,7 @@ async function exportSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
     snapshot.markups,
     snapshot.drawings,
     snapshot.images,
+    snapshot.texts,
   )
 }
 
@@ -536,9 +538,11 @@ function snapshotOf(pdfBytes: Uint8Array): DocumentSnapshot {
     markups: [],
     drawings: [],
     images: [],
+    texts: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
+    selectedTextId: null,
   }
 }
 
