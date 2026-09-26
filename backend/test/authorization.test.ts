@@ -7,6 +7,7 @@ import type { ApplicationUser, AuthIdentity } from '../src/lib/authIdentity.js'
 import type { DocumentsDb } from '../src/lib/documentsDb.js'
 import { resolveApplicationUser } from '../src/lib/resolveUser.js'
 import { removeStoredFile, resolveStoredFile } from '../src/lib/documentStorage.js'
+import { createMemoryPdfStorage } from './memoryPdfStorage.js'
 
 const PDF_MIME_TYPE = 'application/pdf'
 const createdFiles: string[] = []
@@ -148,6 +149,7 @@ describe('application user mapping', () => {
 function appFor(db: DocumentsDb): Express {
   return createApp({
     db,
+    pdfStorage: createMemoryPdfStorage(),
     verifyAuthorization(header) {
       const token = header?.startsWith('Bearer ') ? header.slice('Bearer '.length) : ''
       if (token === 'a') {

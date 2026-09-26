@@ -14,6 +14,7 @@ import {
   uploadedPdfRejection,
 } from '../lib/documentStorage.js'
 import { pipeStoredPdf } from '../lib/pdfResponse.js'
+import { r2PdfStorage, type PdfStorage } from '../lib/pdfStorage.js'
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -30,22 +31,25 @@ const upload = multer({
   },
 })
 
-export function createDocumentsRouter(db: DocumentsDb = documentsDb): Router {
+export function createDocumentsRouter(
+  db: DocumentsDb = documentsDb,
+  storage: PdfStorage = r2PdfStorage,
+): Router {
   const router = Router()
   router.post('/', receivePdf, (request, response) => {
-    void createDocument(db, request, response)
+    void createDocument(db, storage, request, response)
   })
   router.post('/:documentId/versions', receivePdf, (request, response) => {
-    void createDocumentVersion(db, request, response)
+    void createDocumentVersion(db, storage, request, response)
   })
   router.get('/:documentId/versions/:version/file', (request, response) => {
-    void sendVersionFile(db, request, response)
+    void sendVersionFile(db, storage, request, response)
   })
   router.get('/:documentId/versions', (request, response) => {
     void listVersions(db, request, response)
   })
   router.get('/:id/file', (request, response) => {
-    void sendDocumentFile(db, request, response)
+    void sendDocumentFile(db, storage, request, response)
   })
   router.get('/:id', (request, response) => {
     void readDocument(db, request, response)
@@ -70,6 +74,7 @@ const receivePdf: RequestHandler = (request, response, next) => {
 
 async function createDocument(
   db: DocumentsDb,
+  storage: PdfStorage,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -96,6 +101,8 @@ async function createDocument(
   const fileUrl = storedFileUrl(file.filename)
 
   try {
+    await storage.uploadPdf(file.path, fileUrl)
+
     const document = await db.document.create({
       data: {
         name: displayFileName(file.originalname),
@@ -114,10 +121,13 @@ async function createDocument(
 
     const version = document.versions[0]
     if (!version) {
+      await storage.deletePdf(fileUrl).catch(() => undefined)
       await removeStoredFile(file.path)
       response.status(500).json({ error: 'The document could not be saved.' })
       return
     }
+
+    await removeStoredFile(file.path)
 
     response.status(201).json({
       id: document.id,
@@ -127,7 +137,9 @@ async function createDocument(
       fileUrl: version.fileUrl,
     })
   } catch {
+    await storage.deletePdf(fileUrl).catch(() => undefined)
     await removeStoredFile(file.path)
+
     console.error('Document upload failed.')
     response.status(500).json({ error: 'The document could not be saved.' })
   }
@@ -135,6 +147,7 @@ async function createDocument(
 
 async function createDocumentVersion(
   db: DocumentsDb,
+  storage: PdfStorage,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -176,11 +189,14 @@ async function createDocumentVersion(
     response.status(404).json({ error: 'Document not found.' })
     return
   }
-
   const fileUrl = storedFileUrl(file.filename)
 
   try {
+    await storage.uploadPdf(file.path, fileUrl)
+
     const saved = await insertNextVersion(db, documentId, fileUrl)
+    await removeStoredFile(file.path)
+
     response.status(201).json({
       id: saved.id,
       documentId: saved.documentId,
@@ -189,7 +205,9 @@ async function createDocumentVersion(
       createdAt: saved.createdAt,
     })
   } catch (error) {
+    await storage.deletePdf(fileUrl).catch(() => undefined)
     await removeStoredFile(file.path)
+
     if (isPrismaCode(error, 'P2003')) {
       response.status(404).json({ error: 'Document not found.' })
       return
@@ -240,6 +258,7 @@ async function listVersions(
 
 async function sendVersionFile(
   db: DocumentsDb,
+  storage: PdfStorage,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -273,7 +292,7 @@ async function sendVersionFile(
     return
   }
 
-  await pipeStoredPdf(response, version.fileUrl, version.document.name)
+  await pipeStoredPdf(response, version.fileUrl, version.document.name, storage)
 }
 
 async function readDocument(
@@ -319,6 +338,7 @@ async function readDocument(
 
 async function sendDocumentFile(
   db: DocumentsDb,
+  storage: PdfStorage,
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
 ): Promise<void> {
@@ -349,7 +369,7 @@ async function sendDocumentFile(
     return
   }
 
-  await pipeStoredPdf(response, version.fileUrl, document.name)
+  await pipeStoredPdf(response, version.fileUrl, document.name, storage)
 }
 
 const handleUploadError: ErrorRequestHandler = (error, request, response, next) => {

@@ -10,6 +10,7 @@
     "test": "tsx --test test/auditFixes.test.ts test/authorization.test.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1140.0",
     "@neondatabase/serverless": "^1.1.0",
     "@prisma/adapter-neon": "^7.10.0",
     "@prisma/client": "^7.10.0",

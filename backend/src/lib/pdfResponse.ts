@@ -1,6 +1,5 @@
-import { createReadStream } from 'node:fs'
 import type { Response } from 'express'
-import { storedPdfInfo } from './documentStorage.js'
+import { r2PdfStorage, type PdfStorage } from './pdfStorage.js'
 
 const PDF_MIME_TYPE = 'application/pdf'
 
@@ -8,43 +7,73 @@ export async function pipeStoredPdf(
   response: Response,
   fileUrl: string,
   downloadName: string,
+  storage: PdfStorage = r2PdfStorage,
 ): Promise<void> {
-  const info = await storedPdfInfo(fileUrl)
-  if (!info) {
-    sendMissingPdf(response)
-    return
-  }
+  try {
+    const { body, contentLength } = await storage.getPdf(fileUrl)
 
-  const stream = createReadStream(info.absolutePath)
-  let piping = false
-
-  stream.on('error', (error: NodeJS.ErrnoException) => {
-    if (!piping || !response.headersSent) {
-      if (error.code === 'ENOENT') {
-        sendMissingPdf(response)
-        return
-      }
-      if (!response.headersSent) {
-        response.status(500).json({ error: 'The stored PDF could not be read.' })
-      }
+    if (response.writableEnded) {
+      body.destroy()
       return
     }
 
-    if (!response.destroyed) {
-      response.destroy()
-    }
-  })
+    response.setHeader('Content-Type', PDF_MIME_TYPE)
 
-  if (response.writableEnded) {
-    stream.destroy()
-    return
+    if (contentLength !== undefined) {
+      response.setHeader('Content-Length', contentLength)
+    }
+
+    response.setHeader(
+      'Content-Disposition',
+      contentDisposition(downloadName),
+    )
+
+    body.on('error', () => {
+      if (!response.headersSent) {
+        response.status(500).json({
+          error: 'The stored PDF could not be read.',
+        })
+        return
+      }
+
+      if (!response.destroyed) {
+        response.destroy()
+      }
+    })
+
+    body.pipe(response)
+  } catch (error) {
+    if (isMissingObject(error)) {
+      sendMissingPdf(response)
+      return
+    }
+
+    console.error('R2 PDF read failed.')
+
+    if (!response.headersSent) {
+      response.status(500).json({
+        error: 'The stored PDF could not be read.',
+      })
+    }
+  }
+}
+
+function isMissingObject(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false
   }
 
-  response.setHeader('Content-Type', PDF_MIME_TYPE)
-  response.setHeader('Content-Length', info.size)
-  response.setHeader('Content-Disposition', contentDisposition(downloadName))
-  piping = true
-  stream.pipe(response)
+  const value = error as {
+    name?: string
+    $metadata?: {
+      httpStatusCode?: number
+    }
+  }
+
+  return (
+    value.name === 'NoSuchKey' ||
+    value.$metadata?.httpStatusCode === 404
+  )
 }
 
 function sendMissingPdf(response: Response): void {

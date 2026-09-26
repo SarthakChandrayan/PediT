@@ -17,6 +17,7 @@ import {
   uploadedPdfRejection,
 } from '../src/lib/documentStorage.js'
 import { pipeStoredPdf } from '../src/lib/pdfResponse.js'
+import { createMemoryPdfStorage } from './memoryPdfStorage.js'
 
 const PDF_MIME_TYPE = 'application/pdf'
 const createdFiles: string[] = []
@@ -27,12 +28,13 @@ after(async () => {
 
 describe('missing stored PDF', () => {
   it('returns 404, stays alive, and still serves /health', async () => {
+    const storage = createMemoryPdfStorage()
     const app = express()
     app.get('/health', (_request, response) => {
       response.json({ status: 'ok' })
     })
     app.get('/api/documents/:documentId/versions/:version/file', async (_request, response) => {
-      await pipeStoredPdf(response, `documents/${storedPdfName()}`, 'missing.pdf')
+      await pipeStoredPdf(response, `documents/${storedPdfName()}`, 'missing.pdf', storage)
     })
 
     const { baseUrl, close } = await listen(app)
@@ -66,13 +68,17 @@ describe('missing stored PDF', () => {
     await ensureDocumentsDirectory()
     const filename = storedPdfName()
     const filePath = path.join(DOCUMENTS_DIRECTORY, filename)
+    const fileUrl = storedFileUrl(filename)
     const bytes = Buffer.from('%PDF-1.4\n% stored file stream fixture\n')
     await writeFile(filePath, bytes)
     createdFiles.push(filePath)
 
+    const storage = createMemoryPdfStorage()
+    await storage.uploadPdf(filePath, fileUrl)
+
     const app = express()
     app.get('/api/documents/:documentId/versions/:version/file', async (_request, response) => {
-      await pipeStoredPdf(response, storedFileUrl(filename), 'fixture.pdf')
+      await pipeStoredPdf(response, fileUrl, 'fixture.pdf', storage)
     })
 
     const { baseUrl, close } = await listen(app)
@@ -85,6 +91,36 @@ describe('missing stored PDF', () => {
     } finally {
       await close()
     }
+  })
+})
+
+describe('PDF storage upload and cleanup', () => {
+  it('uploads from a temp file, streams bytes, and deletes the object', async () => {
+    await ensureDocumentsDirectory()
+    const filename = storedPdfName()
+    const filePath = path.join(DOCUMENTS_DIRECTORY, filename)
+    const fileUrl = storedFileUrl(filename)
+    const bytes = Buffer.from('%PDF-1.4\n% memory storage fixture\n')
+    await writeFile(filePath, bytes)
+    createdFiles.push(filePath)
+
+    const storage = createMemoryPdfStorage()
+    await storage.uploadPdf(filePath, fileUrl)
+
+    const streamed = await storage.getPdf(fileUrl)
+    const chunks: Buffer[] = []
+    for await (const chunk of streamed.body) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    assert.deepEqual(Buffer.concat(chunks), bytes)
+    assert.equal(streamed.contentLength, bytes.byteLength)
+
+    await storage.deletePdf(fileUrl)
+    await assert.rejects(() => storage.getPdf(fileUrl), (error: unknown) => {
+      assert.ok(error && typeof error === 'object')
+      assert.equal((error as { name?: string }).name, 'NoSuchKey')
+      return true
+    })
   })
 })
 
