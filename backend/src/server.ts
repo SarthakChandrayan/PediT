@@ -6,8 +6,8 @@ dotenv.config()
 const port = readPort(process.env.PORT)
 const app = createApp()
 
-app.listen(port, 'localhost', () => {
-  console.log(`PediT backend listening on http://localhost:${port}`)
+app.listen(port, '0.0.0.0', () => {
+  console.log(`PediT backend listening on http://0.0.0.0:${port}`)
 })
 
 function readPort(value: string | undefined): number {
