@@ -1,6 +1,8 @@
 import { authorizedFetch, SessionExpiredError } from './accessToken.ts'
 
-export const DOCUMENTS_URL = 'http://localhost:8000/api/documents'
+const API_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? 'http://localhost:8000'
+
+export const DOCUMENTS_URL = `${API_ORIGIN}/api/documents`
 
 export type DocumentListItem = {
   id: string

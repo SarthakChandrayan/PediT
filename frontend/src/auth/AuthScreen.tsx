@@ -274,7 +274,7 @@ export function AuthScreen() {
                 <button
                   type="submit"
                   className="button button--primary auth-panel__submit"
-                  disabled={busy || ((info || otp.length > 0) && otp.length < 6)}
+                  disabled={busy || (!!(info || otp.length > 0) && otp.length < 6)}
                 >
                   {auth.pending
                     ? 'Please wait…'
