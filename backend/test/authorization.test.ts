@@ -131,6 +131,59 @@ describe('document authorization', () => {
       await close()
     }
   })
+
+  it('lists only the authenticated user documents', async () => {
+    const db = memoryDb()
+    const { baseUrl, close } = await listen(appFor(db))
+    try {
+      const first = await postPdf(baseUrl, 'a', 'alpha.pdf', pdfBytes('alpha'))
+      assert.equal(first.status, 201)
+      const firstBody = (await first.json()) as { id: string }
+
+      const second = await postPdf(baseUrl, 'a', 'beta.pdf', pdfBytes('beta'))
+      assert.equal(second.status, 201)
+      const secondBody = (await second.json()) as { id: string }
+
+      await postPdf(baseUrl, 'b', 'other.pdf', pdfBytes('other'))
+
+      const listed = await fetch(`${baseUrl}/api/documents`, { headers: auth('a') })
+      assert.equal(listed.status, 200)
+      const body = (await listed.json()) as Array<{
+        id: string
+        name: string
+        version: number
+      }>
+      assert.deepEqual(
+        body.map((item) => ({ id: item.id, name: item.name, version: item.version })),
+        [
+          { id: secondBody.id, name: 'beta.pdf', version: 1 },
+          { id: firstBody.id, name: 'alpha.pdf', version: 1 },
+        ],
+      )
+
+      const otherList = await fetch(`${baseUrl}/api/documents`, { headers: auth('b') })
+      assert.equal(otherList.status, 200)
+      const otherBody = (await otherList.json()) as Array<{ name: string }>
+      assert.deepEqual(
+        otherBody.map((item) => item.name),
+        ['other.pdf'],
+      )
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('rejects an unauthenticated list request', async () => {
+    const { baseUrl, close } = await listen(appFor(memoryDb()))
+    try {
+      const response = await fetch(`${baseUrl}/api/documents`)
+      assert.equal(response.status, 401)
+      assert.deepEqual(await response.json(), { error: 'Authentication is required.' })
+    } finally {
+      await close()
+    }
+  })
 })
 
 describe('application user mapping', () => {
@@ -295,6 +348,30 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
             fileUrl: item.fileUrl,
           })),
         }
+      },
+      async findMany({ where }) {
+        return documents
+          .filter((item) => item.userId === where.userId)
+          .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+          .map((document) => {
+            const latest = [...document.versions].sort(
+              (left, right) => right.version - left.version,
+            )[0]
+            return {
+              id: document.id,
+              name: document.name,
+              createdAt: document.createdAt,
+              versions: latest
+                ? [
+                    {
+                      version: latest.version,
+                      createdAt: latest.createdAt,
+                      fileUrl: latest.fileUrl,
+                    },
+                  ]
+                : [],
+            }
+          })
       },
       async findFirst(args) {
         const document = documents.find(

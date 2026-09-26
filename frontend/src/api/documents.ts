@@ -2,11 +2,47 @@ import { authorizedFetch, SessionExpiredError } from './accessToken.ts'
 
 export const DOCUMENTS_URL = 'http://localhost:8000/api/documents'
 
+export type DocumentListItem = {
+  id: string
+  name: string
+  version: number
+  fileUrl: string
+  createdAt: string
+  updatedAt: string
+}
+
 export type DocumentVersionRecord = {
   id: string
   version: number
   fileUrl: string
   createdAt: string
+}
+
+export async function listDocuments(): Promise<DocumentListItem[]> {
+  let response: Response
+  try {
+    response = await authorizedFetch(DOCUMENTS_URL)
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable.', { cause: error })
+  }
+
+  if (response.status === 401) {
+    throw new SessionExpiredError()
+  }
+
+  if (!response.ok) {
+    throw new Error('Documents could not be loaded.')
+  }
+
+  const payload: unknown = await response.json()
+  if (!Array.isArray(payload) || !payload.every(isDocumentListItem)) {
+    throw new Error('Documents could not be loaded.')
+  }
+
+  return payload
 }
 
 export async function getDocumentVersions(
@@ -86,5 +122,31 @@ function isDocumentVersionRecord(value: unknown): value is DocumentVersionRecord
     'createdAt' in value &&
     typeof value.createdAt === 'string' &&
     value.createdAt.length > 0
+  )
+}
+
+function isDocumentListItem(value: unknown): value is DocumentListItem {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    value.id.length > 0 &&
+    'name' in value &&
+    typeof value.name === 'string' &&
+    value.name.length > 0 &&
+    'version' in value &&
+    typeof value.version === 'number' &&
+    Number.isInteger(value.version) &&
+    value.version > 0 &&
+    'fileUrl' in value &&
+    typeof value.fileUrl === 'string' &&
+    value.fileUrl.length > 0 &&
+    'createdAt' in value &&
+    typeof value.createdAt === 'string' &&
+    value.createdAt.length > 0 &&
+    'updatedAt' in value &&
+    typeof value.updatedAt === 'string' &&
+    value.updatedAt.length > 0
   )
 }

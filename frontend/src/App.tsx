@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
-import { getDocumentVersionFile, type DocumentVersionRecord } from './api/documents.ts'
+import {
+  getDocumentVersionFile,
+  type DocumentListItem,
+  type DocumentVersionRecord,
+} from './api/documents.ts'
 import { saveDocumentVersion } from './api/saveDocumentVersion.ts'
 import { uploadDocument } from './api/uploadDocument.ts'
 import { AuthProvider } from './auth/AuthContext.tsx'
 import { useAuth } from './auth/useAuth.ts'
 import { AuthScreen } from './auth/AuthScreen.tsx'
+import { DocumentsDashboard } from './components/DocumentsDashboard.tsx'
 import { EditorHeader } from './components/EditorHeader.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
 import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
@@ -92,6 +97,8 @@ function Editor({
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [versionListRevision, setVersionListRevision] = useState(0)
+  const [dashboardRefreshKey, setDashboardRefreshKey] = useState(0)
+  const [openingDocumentId, setOpeningDocumentId] = useState<string | null>(null)
   const [pageOpPending, setPageOpPending] = useState(false)
   const [focusPage, setFocusPage] = useState(1)
   const uploadGeneration = useRef(0)
@@ -277,6 +284,7 @@ function Editor({
             fileName: file.name,
             fileUrl: uploaded.fileUrl,
           })
+          setDashboardRefreshKey((current) => current + 1)
         }
       })
       .catch((error: unknown) => {
@@ -391,6 +399,96 @@ function Editor({
       history.isDirty,
       viewerRef.current?.hasUncommittedEdit() ?? false,
     )
+  }
+
+  async function handleOpenListedDocument(document: DocumentListItem) {
+    if (openingDocumentId !== null) {
+      return
+    }
+    if (hasUnsavedEdits() && !window.confirm(UNSAVED_DOCUMENT_MESSAGE)) {
+      return
+    }
+
+    const generation = openGeneration.current + 1
+    openGeneration.current = generation
+    uploadGeneration.current += 1
+    setOpeningDocumentId(document.id)
+    setOpenError(null)
+    setUploadError(null)
+    setSaveError(null)
+
+    try {
+      const bytes = await getDocumentVersionFile(document.id, document.version)
+      if (openGeneration.current !== generation) {
+        return
+      }
+
+      viewerRef.current?.abandonActiveEdit()
+      viewerRef.current?.dismissDrawingDraft()
+      resetHistoryRef.current(loadedSnapshot(bytes))
+      setDocumentSession((current) => current + 1)
+      setFocusPage(1)
+      setFileName(document.name)
+      setDocumentId(document.id)
+      setCurrentVersion(document.version)
+      setVersionFileUrl(document.fileUrl)
+      setScale(DEFAULT_PDF_SCALE)
+      setCurrentPage(1)
+      setPageCount(0)
+      setVersionListRevision((current) => current + 1)
+      rememberOpenDocument({
+        documentId: document.id,
+        version: document.version,
+        fileName: document.name,
+        fileUrl: document.fileUrl,
+      })
+    } catch (error) {
+      if (openGeneration.current !== generation) {
+        return
+      }
+      setOpenError(
+        error instanceof Error ? error.message : 'That document could not be opened.',
+      )
+    } finally {
+      if (openGeneration.current === generation) {
+        setOpeningDocumentId(null)
+      }
+    }
+  }
+
+  function handleBackToDocuments() {
+    if (hasUnsavedEdits() && !window.confirm(UNSAVED_DOCUMENT_MESSAGE)) {
+      return
+    }
+
+    openGeneration.current += 1
+    uploadGeneration.current += 1
+    viewerRef.current?.abandonActiveEdit()
+    viewerRef.current?.dismissDrawingDraft()
+    clearStoredDocument()
+    setDocumentId(null)
+    setCurrentVersion(null)
+    setVersionFileUrl(null)
+    setFileName(null)
+    setPageCount(0)
+    setCurrentPage(1)
+    setFocusPage(1)
+    setScale(DEFAULT_PDF_SCALE)
+    setOpenError(null)
+    setUploadError(null)
+    setSaveError(null)
+    setOpeningDocumentId(null)
+    setAnnotationUi({
+      canHighlight: false,
+      canRemoveHighlight: false,
+      drawingTool: null,
+      textTool: false,
+      selectedNewText: null,
+      selectedImage: null,
+      selectedDrawing: false,
+      hasUncommittedEdit: false,
+    })
+    setDashboardRefreshKey((current) => current + 1)
   }
 
   function workingSnapshot(): DocumentSnapshot {
@@ -568,6 +666,7 @@ function Editor({
         saving={saving}
         exporting={exporting}
         hasDocument={fileName !== null}
+        onDocuments={handleBackToDocuments}
         onOpen={openFilePicker}
         onSave={() => {
           void handleSave()
@@ -637,7 +736,14 @@ function Editor({
             onAnnotationStateChange={setAnnotationUi}
           />
         ) : (
-          <EmptyState onUpload={openFilePicker} />
+          <DocumentsDashboard
+            refreshKey={dashboardRefreshKey}
+            openingId={openingDocumentId}
+            onUpload={openFilePicker}
+            onOpenDocument={(document) => {
+              void handleOpenListedDocument(document)
+            }}
+          />
         )}
       </main>
       <Toolbar
@@ -761,6 +867,7 @@ function SearchHotkeys({ documentOpen }: { documentOpen: boolean }) {
 }
 
 const UNSAVED_VERSION_MESSAGE = 'You have unsaved changes. Open this version anyway?'
+const UNSAVED_DOCUMENT_MESSAGE = 'You have unsaved changes. Leave this document anyway?'
 const OPEN_DOCUMENT_KEY = 'pdfforge.openDocument'
 
 function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {
@@ -950,21 +1057,6 @@ function pageOperationErrorMessage(error: unknown): string {
   }
 
   return 'That page change could not be applied.'
-}
-
-function EmptyState({ onUpload }: { onUpload: () => void }) {
-  return (
-    <div className="empty">
-      <div className="empty__panel">
-        <img className="empty__logo" src="/logo.png" alt="PeDit" />
-        <h1>Open a PDF to get started</h1>
-        <p>Choose a PDF from this computer to view and edit its pages.</p>
-        <button type="button" className="button button--primary" onClick={onUpload}>
-          Open PDF
-        </button>
-      </div>
-    </div>
-  )
 }
 
 export default App

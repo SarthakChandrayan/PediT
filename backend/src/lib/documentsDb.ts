@@ -30,6 +30,31 @@ export type DocumentsDb = {
       createdAt: Date
       versions: Array<{ version: number; fileUrl: string }>
     }>
+    findMany(args: {
+      where: { userId: string }
+      orderBy: { createdAt: 'desc' }
+      select: {
+        id: true
+        name: true
+        createdAt: true
+        versions: {
+          orderBy: { version: 'desc' }
+          take: 1
+          select: {
+            version: true
+            createdAt: true
+            fileUrl: true
+          }
+        }
+      }
+    }): Promise<
+      Array<{
+        id: string
+        name: string
+        createdAt: Date
+        versions: Array<{ version: number; createdAt: Date; fileUrl: string }>
+      }>
+    >
     findFirst(args: {
       where: { id: string; userId: string }
       select?: { id: true } | {

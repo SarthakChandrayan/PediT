@@ -285,7 +285,8 @@ p {
 }
 
 .pdf-stage,
-.empty {
+.empty,
+.dashboard {
   flex: 1;
   min-height: 0;
 }
@@ -778,6 +779,105 @@ p {
   display: grid;
   place-items: center;
   padding: var(--space-8) var(--space-4);
+}
+
+.dashboard {
+  display: grid;
+  place-items: start center;
+  overflow: auto;
+  padding: var(--space-8) var(--space-4);
+}
+
+.dashboard__panel {
+  width: min(640px, 100%);
+}
+
+.dashboard__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.dashboard__header h1 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.dashboard__header p {
+  margin: var(--space-1) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.dashboard__status,
+.dashboard__empty {
+  color: var(--text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.dashboard__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5) 0;
+}
+
+.dashboard__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.dashboard__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard__item:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+}
+
+.dashboard__item:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.dashboard__item:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.dashboard__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-md);
+  font-weight: 500;
+}
+
+.dashboard__meta {
+  flex: none;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
 .empty__panel {

@@ -8,6 +8,7 @@ type EditorHeaderProps = {
   saving: boolean
   exporting: boolean
   hasDocument: boolean
+  onDocuments: () => void
   onOpen: () => void
   onSave: () => void
   onExport: () => void
@@ -22,6 +23,7 @@ export function EditorHeader({
   saving,
   exporting,
   hasDocument,
+  onDocuments,
   onOpen,
   onSave,
   onExport,
@@ -36,7 +38,7 @@ export function EditorHeader({
         <img className="app-header__logo" src="/mainlogo.png" alt="PeDit" />
       </div>
       <p className="app-header__title" title={fileName ?? undefined}>
-        {fileName ?? 'No PDF open'}
+        {fileName ?? 'Your documents'}
       </p>
       {status ? (
         <p className="app-header__state" data-state={saveState} aria-live="polite">
@@ -45,6 +47,11 @@ export function EditorHeader({
         </p>
       ) : null}
       <div className="app-header__actions">
+        {hasDocument ? (
+          <button type="button" className="button button--ghost" onClick={onDocuments}>
+            Documents
+          </button>
+        ) : null}
         <button type="button" className="button button--ghost" onClick={onOpen}>
           <Icon name="open" />
           Open

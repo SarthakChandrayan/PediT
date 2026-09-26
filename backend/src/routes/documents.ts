@@ -39,6 +39,9 @@ export function createDocumentsRouter(
   router.post('/', receivePdf, (request, response) => {
     void createDocument(db, storage, request, response)
   })
+  router.get('/', (request, response) => {
+    void listDocuments(db, request, response)
+  })
   router.post('/:documentId/versions', receivePdf, (request, response) => {
     void createDocumentVersion(db, storage, request, response)
   })
@@ -56,6 +59,58 @@ export function createDocumentsRouter(
   })
   router.use(handleUploadError)
   return router
+}
+
+async function listDocuments(
+  db: DocumentsDb,
+  request: Parameters<RequestHandler>[0],
+  response: Parameters<RequestHandler>[1],
+): Promise<void> {
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const documents = await db.document.findMany({
+    where: { userId: ownerId },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      name: true,
+      createdAt: true,
+      versions: {
+        orderBy: { version: 'desc' },
+        take: 1,
+        select: {
+          version: true,
+          createdAt: true,
+          fileUrl: true,
+        },
+      },
+    },
+  })
+
+  const listed = documents
+    .flatMap((document) => {
+      const latest = document.versions[0]
+      if (!latest) {
+        return []
+      }
+      return [
+        {
+          id: document.id,
+          name: document.name,
+          version: latest.version,
+          fileUrl: latest.fileUrl,
+          createdAt: document.createdAt,
+          updatedAt: latest.createdAt,
+        },
+      ]
+    })
+    .sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime())
+
+  response.json(listed)
 }
 
 const receivePdf: RequestHandler = (request, response, next) => {
