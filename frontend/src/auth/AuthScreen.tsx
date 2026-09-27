@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { Banner } from '../components/Banner.tsx'
 import { useAuth } from './useAuth.ts'
 
 type AuthView =
@@ -18,7 +19,7 @@ export function AuthScreen() {
   const [otp, setOtp] = useState('')
   const [info, setInfo] = useState<string | null>(null)
   const [resendCooldown, setResendCooldown] = useState(0)
-  const busy = !auth.configured || auth.pending || auth.status === 'loading'
+  const busy = !auth.configured || auth.pending
 
   useEffect(() => {
     if (resendCooldown <= 0) {
@@ -153,11 +154,12 @@ export function AuthScreen() {
             <img className="empty__logo" src="/logo.png" alt="" />
             <h1>{title}</h1>
             <p>{subtitle}</p>
-            {auth.status === 'loading' ? <p>Checking your session…</p> : null}
             {auth.error ? (
-              <p className="banner auth-panel__error" role="alert">
-                {auth.error}
-              </p>
+              <Banner
+                className="auth-panel__error"
+                message={auth.error}
+                onDismiss={auth.clearError}
+              />
             ) : null}
             {info ? <p className="auth-panel__info">{info}</p> : null}
 

@@ -276,12 +276,47 @@ p {
 }
 
 .banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
   margin: var(--space-2) var(--space-4) 0;
-  padding: 8px 10px;
+  padding: 8px 6px 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: var(--font-size-sm);
+}
+
+.banner__message {
+  flex: 1;
+  min-width: 0;
+  align-self: center;
+}
+
+.banner__close {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.banner__close:hover {
+  opacity: 1;
+  background: rgb(0 0 0 / 0.08);
+}
+
+.banner__close:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+  opacity: 1;
 }
 
 .pdf-stage,

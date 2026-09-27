@@ -9,6 +9,7 @@ import { uploadDocument } from './api/uploadDocument.ts'
 import { AuthProvider } from './auth/AuthContext.tsx'
 import { useAuth } from './auth/useAuth.ts'
 import { AuthScreen } from './auth/AuthScreen.tsx'
+import { Banner, BANNER_AUTO_DISMISS_MS } from './components/Banner.tsx'
 import { DocumentsDashboard } from './components/DocumentsDashboard.tsx'
 import { EditorHeader } from './components/EditorHeader.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
@@ -57,6 +58,9 @@ function App() {
 
 function AuthenticatedApp() {
   const auth = useAuth()
+  if (auth.status === 'loading') {
+    return <SessionCheckScreen />
+  }
   if (!auth.configured || auth.status !== 'authenticated') {
     return <AuthScreen />
   }
@@ -70,6 +74,19 @@ function AuthenticatedApp() {
         }}
       />
     </DocumentHistoryProvider>
+  )
+}
+
+function SessionCheckScreen() {
+  return (
+    <div className="app" aria-busy="true">
+      <header className="app-header">
+        <div className="app-header__brand">
+          <img className="app-header__logo" src="/mainlogo.png" alt="PeDit" />
+        </div>
+      </header>
+      <main className="workspace" />
+    </div>
   )
 }
 
@@ -127,13 +144,18 @@ function Editor({
   })
   const historyDirtyRef = useRef(history.isDirty)
   historyDirtyRef.current = history.isDirty
+  const [restoring, setRestoring] = useState(() => readStoredDocument() !== null)
 
   useEffect(() => {
     const generation = uploadGeneration.current
     let cancelled = false
 
     void restoreOpenDocument(() => cancelled).then((restored) => {
-      if (!restored || cancelled || uploadGeneration.current !== generation) {
+      if (cancelled) {
+        return
+      }
+      setRestoring(false)
+      if (!restored || uploadGeneration.current !== generation) {
         return
       }
       resetHistoryRef.current(loadedSnapshot(restored.bytes))
@@ -706,19 +728,21 @@ function Editor({
         />
         <div className="workspace__alerts">
           {openError ? (
-            <p className="banner" role="alert">
-              {openError}
-            </p>
+            <Banner
+              message={openError}
+              onDismiss={() => setOpenError(null)}
+              autoDismissMs={BANNER_AUTO_DISMISS_MS}
+            />
           ) : null}
           {uploadError ? (
-            <p className="banner" role="alert">
-              {uploadError}
-            </p>
+            <Banner message={uploadError} onDismiss={() => setUploadError(null)} />
           ) : null}
           {saveError ? (
-            <p className="banner" role="alert">
-              {saveError}
-            </p>
+            <Banner
+              message={saveError}
+              onDismiss={() => setSaveError(null)}
+              autoDismissMs={BANNER_AUTO_DISMISS_MS}
+            />
           ) : null}
         </div>
         {fileName ? (
@@ -735,6 +759,10 @@ function Editor({
             }}
             onAnnotationStateChange={setAnnotationUi}
           />
+        ) : restoring ? (
+          <p className="viewer-status" role="status">
+            Opening your document…
+          </p>
         ) : (
           <DocumentsDashboard
             refreshKey={dashboardRefreshKey}

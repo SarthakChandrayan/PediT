@@ -5,6 +5,7 @@ import {
   type DocumentListItem,
 } from '../api/documents.ts'
 import { SessionExpiredError } from '../api/accessToken.ts'
+import { Banner, BANNER_AUTO_DISMISS_MS } from './Banner.tsx'
 import { Icon } from './icons.tsx'
 
 type DocumentsDashboardProps = {
@@ -22,21 +23,24 @@ export function DocumentsDashboard({
 }: DocumentsDashboardProps) {
   const [documents, setDocuments] = useState<DocumentListItem[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    setError(null)
 
     void listDocuments()
       .then((items) => {
         if (!cancelled) {
           setDocuments(items)
+          setError(null)
+          setLoadFailed(false)
         }
       })
       .catch((cause: unknown) => {
         if (cancelled) {
           return
         }
+        setLoadFailed(true)
         if (cause instanceof SessionExpiredError) {
           setError('Your session expired. Sign in again to see your documents.')
           return
@@ -77,7 +81,7 @@ export function DocumentsDashboard({
     }
   }
 
-  const loading = documents === null && error === null
+  const loading = documents === null && !loadFailed
   const busy = openingId !== null || deletingId !== null
 
   return (
@@ -94,21 +98,19 @@ export function DocumentsDashboard({
           </button>
         </div>
 
-        {error ? (
-          <p className="banner" role="alert">
-            {error}
-          </p>
-        ) : null}
+        {error ? <Banner message={error} onDismiss={() => setError(null)} /> : null}
 
         {deleteError ? (
-          <p className="banner" role="alert">
-            {deleteError}
-          </p>
+          <Banner
+            message={deleteError}
+            onDismiss={() => setDeleteError(null)}
+            autoDismissMs={BANNER_AUTO_DISMISS_MS}
+          />
         ) : null}
 
         {loading ? <p className="dashboard__status">Loading documents…</p> : null}
 
-        {!loading && documents && documents.length === 0 && !error ? (
+        {!loading && documents && documents.length === 0 && !loadFailed ? (
           <div className="dashboard__empty">
             <p>No documents yet.</p>
             <button type="button" className="button button--secondary" onClick={onUpload}>
@@ -138,7 +140,7 @@ export function DocumentsDashboard({
                         ? 'Opening…'
                         : deleting
                           ? 'Deleting…'
-                          : formatUpdated(document.updatedAt)}
+                          : `Version ${document.version} · ${formatUpdated(document.updatedAt)}`}
                     </span>
                   </button>
                   <button
