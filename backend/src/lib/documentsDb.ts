@@ -85,8 +85,19 @@ export type DocumentsDb = {
         createdAt?: Date
       }>
     } | null>
+    deleteMany(args: {
+      where: {
+        id: string
+        userId: string
+        versions: { every: { id: { in: string[] } } }
+      }
+    }): Promise<{ count: number }>
   }
   documentVersion: {
+    findMany(args: {
+      where: { fileUrl: { in: string[] }; documentId: { not: string } }
+      select: { fileUrl: true }
+    }): Promise<Array<{ fileUrl: string }>>
     findFirst(args: {
       where: {
         documentId: string

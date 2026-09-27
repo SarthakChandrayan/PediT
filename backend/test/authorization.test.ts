@@ -7,6 +7,7 @@ import type { ApplicationUser, AuthIdentity } from '../src/lib/authIdentity.js'
 import type { DocumentsDb } from '../src/lib/documentsDb.js'
 import { resolveApplicationUser } from '../src/lib/resolveUser.js'
 import { removeStoredFile, resolveStoredFile } from '../src/lib/documentStorage.js'
+import type { PdfStorage } from '../src/lib/pdfStorage.js'
 import { trustProxySetting } from '../src/lib/trustProxy.js'
 import { documentRateLimitsFromEnv, type DocumentRateLimits } from '../src/middleware/rateLimit.js'
 import { createMemoryPdfStorage } from './memoryPdfStorage.js'
@@ -354,6 +355,194 @@ describe('document rate limiting', () => {
   })
 })
 
+describe('document deletion', () => {
+  it('lets the owner delete a document with every version and stored PDF', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const doomedId = await createWithVersions(baseUrl, 'doomed.pdf', 3)
+      const keptId = await createWithVersions(baseUrl, 'kept.pdf', 1)
+      const doomedKeys = versionKeys(db, doomedId)
+      const keptKeys = versionKeys(db, keptId)
+      assert.equal(doomedKeys.length, 3)
+
+      const deleted = await deleteDocument(baseUrl, doomedId, 'a')
+      assert.equal(deleted.status, 204)
+      assert.equal(await deleted.text(), '')
+
+      assert.equal(db.documents.some((item) => item.id === doomedId), false)
+      assert.equal(
+        db.documents.flatMap((item) => item.versions).some((item) => item.documentId === doomedId),
+        false,
+      )
+      assert.deepEqual([...tracked.deleted].sort(), [...doomedKeys].sort())
+      for (const key of doomedKeys) {
+        await assert.rejects(() => tracked.storage.getPdf(key))
+      }
+
+      assert.deepEqual(versionKeys(db, keptId), keptKeys)
+      await tracked.storage.getPdf(keptKeys[0]!)
+      assert.equal(db.users.some((user) => user.authUserId === USER_A.authUserId), true)
+
+      const reread = await fetch(`${baseUrl}/api/documents/${doomedId}`, { headers: auth('a') })
+      assert.equal(reread.status, 404)
+      const listed = await fetch(`${baseUrl}/api/documents`, { headers: auth('a') })
+      const body = (await listed.json()) as Array<{ id: string }>
+      assert.deepEqual(body.map((item) => item.id), [keptId])
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it("returns the non-disclosing 404 for another user's document and deletes nothing", async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const id = await createWithVersions(baseUrl, 'private.pdf', 2)
+
+      const denied = await deleteDocument(baseUrl, id, 'b')
+      assert.equal(denied.status, 404)
+      assert.deepEqual(await denied.json(), { error: 'Document not found.' })
+      assert.equal(versionKeys(db, id).length, 2)
+      assert.deepEqual(tracked.deleted, [])
+
+      const stillThere = await fetch(`${baseUrl}/api/documents/${id}/file`, { headers: auth('a') })
+      assert.equal(stillThere.status, 200)
+      await stillThere.arrayBuffer()
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('rejects unauthenticated deletion', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const id = await createWithVersions(baseUrl, 'guarded.pdf', 1)
+
+      const rejected = await fetch(`${baseUrl}/api/documents/${id}`, { method: 'DELETE' })
+      assert.equal(rejected.status, 401)
+      assert.deepEqual(await rejected.json(), { error: 'Authentication is required.' })
+      assert.equal(db.documents.some((item) => item.id === id), true)
+      assert.deepEqual(tracked.deleted, [])
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('returns 404 for a document that does not exist', async () => {
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(memoryDb(), { pdfStorage: tracked.storage }))
+    try {
+      const missing = await deleteDocument(baseUrl, 'document-does-not-exist', 'a')
+      assert.equal(missing.status, 404)
+      assert.deepEqual(await missing.json(), { error: 'Document not found.' })
+      assert.deepEqual(tracked.deleted, [])
+    } finally {
+      await close()
+    }
+  })
+
+  it('treats an already-missing stored PDF as deleted', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const id = await createWithVersions(baseUrl, 'partial.pdf', 2)
+      const keys = versionKeys(db, id)
+      tracked.missing.add(keys[0]!)
+
+      const deleted = await deleteDocument(baseUrl, id, 'a')
+      assert.equal(deleted.status, 204)
+      assert.equal(db.documents.some((item) => item.id === id), false)
+      assert.deepEqual([...tracked.deleted].sort(), [...keys].sort())
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('keeps the document when storage cleanup fails and finishes on retry', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const id = await createWithVersions(baseUrl, 'flaky.pdf', 3)
+      const keys = versionKeys(db, id)
+      tracked.failing.add(keys[1]!)
+
+      const failed = await deleteDocument(baseUrl, id, 'a')
+      assert.equal(failed.status, 500)
+      assert.deepEqual(await failed.json(), { error: 'The document could not be deleted.' })
+      assert.deepEqual(versionKeys(db, id), keys)
+
+      tracked.failing.clear()
+      const retried = await deleteDocument(baseUrl, id, 'a')
+      assert.equal(retried.status, 204)
+      assert.equal(db.documents.some((item) => item.id === id), false)
+      for (const key of keys) {
+        await assert.rejects(() => tracked.storage.getPdf(key))
+      }
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('also deletes a version saved while the deletion is in progress', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const id = await createWithVersions(baseUrl, 'racing.pdf', 1)
+      const lateKey = 'documents/late-version.pdf'
+      let injected = false
+      tracked.beforeDelete = async () => {
+        if (injected) {
+          return
+        }
+        injected = true
+        await db.documentVersion.create({ data: { documentId: id, version: 2, fileUrl: lateKey } })
+      }
+
+      const deleted = await deleteDocument(baseUrl, id, 'a')
+      assert.equal(deleted.status, 204)
+      assert.equal(db.documents.some((item) => item.id === id), false)
+      assert.equal(tracked.deleted.includes(lateKey), true)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('does not delete a stored PDF that another document still references', async () => {
+    const db = memoryDb()
+    const tracked = trackingStorage()
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage: tracked.storage }))
+    try {
+      const doomedId = await createWithVersions(baseUrl, 'doomed.pdf', 2)
+      const otherId = await createWithVersions(baseUrl, 'other.pdf', 1)
+      const [sharedKey, ownKey] = versionKeys(db, doomedId)
+      const other = db.documents.find((item) => item.id === otherId)!
+      other.versions[0]!.fileUrl = sharedKey!
+
+      const deleted = await deleteDocument(baseUrl, doomedId, 'a')
+      assert.equal(deleted.status, 204)
+      assert.deepEqual(tracked.deleted, [ownKey])
+      await tracked.storage.getPdf(sharedKey!)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+})
+
 describe('rate limit configuration', () => {
   it('uses the documented defaults when no environment values are set', () => {
     assert.deepEqual(documentRateLimitsFromEnv({}), {
@@ -389,6 +578,61 @@ describe('rate limit configuration', () => {
     }
   })
 })
+
+async function createWithVersions(baseUrl: string, name: string, count: number): Promise<string> {
+  const created = await postPdf(baseUrl, 'a', name, pdfBytes(`${name} v1`))
+  assert.equal(created.status, 201)
+  const { id } = (await created.json()) as { id: string }
+  for (let version = 2; version <= count; version += 1) {
+    const saved = await postPdf(baseUrl, 'a', name, pdfBytes(`${name} v${version}`), undefined, id)
+    assert.equal(saved.status, 201)
+  }
+  return id
+}
+
+function versionKeys(db: { documents: MemoryDocument[] }, documentId: string): string[] {
+  const document = db.documents.find((item) => item.id === documentId)
+  return [...(document?.versions ?? [])]
+    .sort((left, right) => left.version - right.version)
+    .map((version) => version.fileUrl)
+}
+
+function deleteDocument(baseUrl: string, documentId: string, token: 'a' | 'b'): Promise<Response> {
+  return fetch(`${baseUrl}/api/documents/${documentId}`, {
+    method: 'DELETE',
+    headers: auth(token),
+  })
+}
+
+/** Memory storage that records successful deletes and can simulate missing or failing objects. */
+function trackingStorage() {
+  const base = createMemoryPdfStorage()
+  const tracked = {
+    deleted: [] as string[],
+    missing: new Set<string>(),
+    failing: new Set<string>(),
+    beforeDelete: undefined as undefined | ((key: string) => Promise<void>),
+    storage: {
+      uploadPdf: (filePath, objectKey) => base.uploadPdf(filePath, objectKey),
+      getPdf: (objectKey) => base.getPdf(objectKey),
+      async deletePdf(objectKey) {
+        await tracked.beforeDelete?.(objectKey)
+        if (tracked.failing.has(objectKey)) {
+          throw new Error('Storage is unavailable.')
+        }
+        await base.deletePdf(objectKey)
+        tracked.deleted.push(objectKey)
+        if (tracked.missing.has(objectKey)) {
+          throw Object.assign(new Error('The specified key does not exist.'), {
+            name: 'NoSuchKey',
+            $metadata: { httpStatusCode: 404 },
+          })
+        }
+      },
+    } satisfies PdfStorage,
+  }
+  return tracked
+}
 
 function limits(overrides: Partial<DocumentRateLimits>): DocumentRateLimits {
   return { windowMs: 60_000, uploadLimit: 100, versionLimit: 100, readLimit: 100, ...overrides }
@@ -593,8 +837,29 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
           versions: latest ? [latest] : [],
         }
       },
+      async deleteMany({ where }) {
+        const allowed = where.versions.every.id.in
+        const index = documents.findIndex(
+          (item) =>
+            item.id === where.id &&
+            item.userId === where.userId &&
+            item.versions.every((version) => allowed.includes(version.id)),
+        )
+        if (index === -1) {
+          return { count: 0 }
+        }
+        documents.splice(index, 1)
+        return { count: 1 }
+      },
     },
     documentVersion: {
+      async findMany({ where }) {
+        return documents
+          .filter((item) => item.id !== where.documentId.not)
+          .flatMap((item) => item.versions)
+          .filter((version) => where.fileUrl.in.includes(version.fileUrl))
+          .map((version) => ({ fileUrl: version.fileUrl }))
+      },
       async findFirst({ where }) {
         const document = documents.find(
           (item) => item.id === where.documentId && item.userId === where.document.userId,

@@ -13,7 +13,7 @@ import {
   storedPdfName,
   uploadedPdfRejection,
 } from '../lib/documentStorage.js'
-import { pipeStoredPdf } from '../lib/pdfResponse.js'
+import { isMissingObject, pipeStoredPdf } from '../lib/pdfResponse.js'
 import { r2PdfStorage, type PdfStorage } from '../lib/pdfStorage.js'
 
 const upload = multer({
@@ -56,6 +56,9 @@ export function createDocumentsRouter(
   })
   router.get('/:id', (request, response) => {
     void readDocument(db, request, response)
+  })
+  router.delete('/:documentId', (request, response) => {
+    void deleteDocument(db, storage, request, response)
   })
   router.use(handleUploadError)
   return router
@@ -425,6 +428,119 @@ async function sendDocumentFile(
   }
 
   await pipeStoredPdf(response, version.fileUrl, document.name, storage)
+}
+
+const DELETE_ATTEMPTS = 3
+const STORAGE_DELETE_BATCH = 8
+
+/**
+ * Stored PDFs are deleted before the database rows, so a failure always leaves the document
+ * listed and a retry can finish the job. The row delete only succeeds if no version was added
+ * after the objects were deleted; otherwise the new objects are deleted and it tries again.
+ */
+async function deleteDocument(
+  db: DocumentsDb,
+  storage: PdfStorage,
+  request: Parameters<RequestHandler>[0],
+  response: Parameters<RequestHandler>[1],
+): Promise<void> {
+  const documentId = routeId(request.params.documentId)
+  if (!documentId) {
+    response.status(404).json({ error: 'Document not found.' })
+    return
+  }
+
+  const ownerId = request.user?.id
+  if (!ownerId) {
+    response.status(401).json({ error: 'Authentication is required.' })
+    return
+  }
+
+  const deletedKeys = new Set<string>()
+  try {
+    for (let attempt = 0; attempt < DELETE_ATTEMPTS; attempt += 1) {
+      const document = await db.document.findFirst({
+        where: { id: documentId, userId: ownerId },
+        select: {
+          versions: {
+            orderBy: { version: 'desc' },
+            select: {
+              id: true,
+              version: true,
+              fileUrl: true,
+              createdAt: true,
+            },
+          },
+        },
+      })
+      if (!document) {
+        if (attempt === 0) {
+          response.status(404).json({ error: 'Document not found.' })
+        } else {
+          response.status(204).end()
+        }
+        return
+      }
+
+      const versions = document.versions ?? []
+      const pendingKeys = [...new Set(versions.map((version) => version.fileUrl))].filter(
+        (key) => !deletedKeys.has(key),
+      )
+      await deleteStoredPdfs(db, storage, documentId, pendingKeys)
+      for (const key of pendingKeys) {
+        deletedKeys.add(key)
+      }
+
+      const versionIds = versions.flatMap((version) => (version.id ? [version.id] : []))
+      const removed = await db.document.deleteMany({
+        where: {
+          id: documentId,
+          userId: ownerId,
+          versions: { every: { id: { in: versionIds } } },
+        },
+      })
+      if (removed.count > 0) {
+        response.status(204).end()
+        return
+      }
+    }
+
+    console.error('Document deletion kept racing new versions.')
+    response.status(500).json({ error: 'The document could not be deleted.' })
+  } catch {
+    console.error('Document deletion failed.')
+    response.status(500).json({ error: 'The document could not be deleted.' })
+  }
+}
+
+/** Skips keys another document still references. An object that is already gone counts as deleted. */
+async function deleteStoredPdfs(
+  db: DocumentsDb,
+  storage: PdfStorage,
+  documentId: string,
+  keys: string[],
+): Promise<void> {
+  if (keys.length === 0) {
+    return
+  }
+
+  const shared = await db.documentVersion.findMany({
+    where: { fileUrl: { in: keys }, documentId: { not: documentId } },
+    select: { fileUrl: true },
+  })
+  const sharedKeys = new Set(shared.map((version) => version.fileUrl))
+  const ownedKeys = keys.filter((key) => !sharedKeys.has(key))
+
+  for (let start = 0; start < ownedKeys.length; start += STORAGE_DELETE_BATCH) {
+    const batch = ownedKeys.slice(start, start + STORAGE_DELETE_BATCH)
+    const results = await Promise.allSettled(batch.map((key) => storage.deletePdf(key)))
+    const failed = results.some(
+      (result) => result.status === 'rejected' && !isMissingObject(result.reason),
+    )
+    if (failed) {
+      throw new Error('A stored PDF could not be deleted.')
+    }
+  }
 }
 
 const handleUploadError: ErrorRequestHandler = (error, request, response, next) => {

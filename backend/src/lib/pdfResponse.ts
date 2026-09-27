@@ -58,7 +58,7 @@ export async function pipeStoredPdf(
   }
 }
 
-function isMissingObject(error: unknown): boolean {
+export function isMissingObject(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
     return false
   }
