@@ -579,6 +579,177 @@ describe('rate limit configuration', () => {
   })
 })
 
+describe('production hardening', () => {
+  const frontendOrigin = process.env.FRONTEND_ORIGIN ?? 'http://localhost:5173'
+
+  it('sends security headers without breaking CORS or PDF streaming', async () => {
+    const db = memoryDb()
+    const { baseUrl, close } = await listen(appFor(db))
+    try {
+      const health = await fetch(`${baseUrl}/health`, { headers: { origin: frontendOrigin } })
+      assert.equal(health.status, 200)
+      assert.deepEqual(await health.json(), { status: 'ok' })
+      assertSecurityHeaders(health)
+      assert.equal(health.headers.get('access-control-allow-origin'), frontendOrigin)
+
+      const preflight = await fetch(`${baseUrl}/api/documents/doc-1`, {
+        method: 'OPTIONS',
+        headers: {
+          origin: frontendOrigin,
+          'access-control-request-method': 'DELETE',
+          'access-control-request-headers': 'authorization',
+        },
+      })
+      assert.equal(preflight.status, 204)
+      assert.equal(preflight.headers.get('access-control-allow-origin'), frontendOrigin)
+      assert.match(preflight.headers.get('access-control-allow-methods') ?? '', /DELETE/)
+
+      const bytes = pdfBytes('headers')
+      const created = await postPdf(baseUrl, 'a', 'headers.pdf', bytes)
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+
+      const file = await fetch(`${baseUrl}/api/documents/${id}/file`, {
+        headers: { ...auth('a'), origin: frontendOrigin },
+      })
+      assert.equal(file.status, 200)
+      assert.equal(file.headers.get('content-type'), PDF_MIME_TYPE)
+      assert.equal(file.headers.get('access-control-allow-origin'), frontendOrigin)
+      assertSecurityHeaders(file)
+      assert.deepEqual(Buffer.from(await file.arrayBuffer()), bytes)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('rejects oversized and malformed JSON or URL-encoded bodies with a JSON error', async () => {
+    const { baseUrl, close } = await listen(appFor(memoryDb()))
+    const post = (contentType: string, body: string) =>
+      fetch(`${baseUrl}/api/documents`, {
+        method: 'POST',
+        headers: { ...auth('a'), 'content-type': contentType },
+        body,
+      })
+    try {
+      const oversizedJson = await post(
+        'application/json',
+        JSON.stringify({ data: 'x'.repeat(150 * 1024) }),
+      )
+      assert.equal(oversizedJson.status, 413)
+      assert.match(oversizedJson.headers.get('content-type') ?? '', /application\/json/)
+      assert.deepEqual(await oversizedJson.json(), { error: 'The request body is too large.' })
+
+      const oversizedForm = await post(
+        'application/x-www-form-urlencoded',
+        `data=${'x'.repeat(150 * 1024)}`,
+      )
+      assert.equal(oversizedForm.status, 413)
+      assert.deepEqual(await oversizedForm.json(), { error: 'The request body is too large.' })
+
+      const malformed = await post('application/json', '{"data":')
+      assert.equal(malformed.status, 400)
+      const malformedText = await malformed.text()
+      assert.deepEqual(JSON.parse(malformedText), {
+        error: 'The request body could not be parsed.',
+      })
+      assert.equal(/SyntaxError|node_modules|\bat\s/.test(malformedText), false)
+
+      const withinLimit = await post('application/json', JSON.stringify({ data: 'x'.repeat(50 * 1024) }))
+      assert.equal(withinLimit.status, 400)
+      assert.deepEqual(await withinLimit.json(), { error: 'A PDF file is required.' })
+    } finally {
+      await close()
+    }
+  })
+
+  it('still accepts multipart PDFs above the JSON limit and keeps the 20 MB cap', async () => {
+    const db = memoryDb()
+    const { baseUrl, close } = await listen(appFor(db))
+    try {
+      const large = Buffer.concat([pdfBytes('large'), Buffer.alloc(512 * 1024, 0x20)])
+      const accepted = await postPdf(baseUrl, 'a', 'large.pdf', large)
+      assert.equal(accepted.status, 201)
+
+      const oversized = Buffer.concat([pdfBytes('oversized'), Buffer.alloc(20 * 1024 * 1024, 0x20)])
+      const rejected = await postPdf(baseUrl, 'a', 'oversized.pdf', oversized)
+      assert.equal(rejected.status, 413)
+      assert.deepEqual(await rejected.json(), { error: 'PDF files must be 20 MB or smaller.' })
+      assert.equal(db.documents.length, 1)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('returns a generic 500 for unexpected errors without exposing internals', async (t) => {
+    const logged = t.mock.method(console, 'error', () => undefined)
+    const secret =
+      'connect ECONNREFUSED postgresql://pedit:super-secret-password@db.internal:5432/pedit ' +
+      'R2_SECRET_ACCESS_KEY=r2-secret-key at E:\\pdf editor\\backend\\src\\lib\\prisma.ts:12:7'
+    const db = memoryDb()
+    db.document.findMany = async () => {
+      throw Object.assign(new Error(secret), { code: 'P1001', clientVersion: '7.10.0' })
+    }
+    const brokenAuth = appFor(db, {
+      verifyAuthorization: () => Promise.reject(new Error(secret)),
+    })
+    const failures: unknown[] = []
+    const onFailure = (error: unknown) => {
+      failures.push(error)
+    }
+    process.once('uncaughtException', onFailure)
+    process.once('unhandledRejection', onFailure)
+
+    const server = await listen(appFor(db))
+    const authServer = await listen(brokenAuth)
+    try {
+      for (const response of [
+        await fetch(`${server.baseUrl}/api/documents`, { headers: auth('a') }),
+        await fetch(`${authServer.baseUrl}/api/documents`, { headers: auth('a') }),
+      ]) {
+        assert.equal(response.status, 500)
+        assert.match(response.headers.get('content-type') ?? '', /application\/json/)
+        const text = await response.text()
+        assert.deepEqual(JSON.parse(text), {
+          error: 'Something went wrong. Please try again later.',
+        })
+        for (const leak of ['super-secret', 'r2-secret', 'postgresql', 'prisma', 'P1001', 'Error', 'E:\\']) {
+          assert.equal(text.includes(leak), false, leak)
+        }
+      }
+
+      assert.equal(logged.mock.callCount(), 2)
+      for (const call of logged.mock.calls) {
+        const [, details] = call.arguments as [string, { path: string; error: Error }]
+        assert.equal(details.path, '/api/documents')
+        assert.equal(details.error.message, secret)
+      }
+
+      const health = await fetch(`${server.baseUrl}/health`)
+      assert.equal(health.status, 200)
+      assert.equal(failures.length, 0)
+    } finally {
+      process.off('uncaughtException', onFailure)
+      process.off('unhandledRejection', onFailure)
+      await server.close()
+      await authServer.close()
+    }
+  })
+})
+
+function assertSecurityHeaders(response: Response) {
+  assert.match(response.headers.get('content-security-policy') ?? '', /default-src 'self'/)
+  assert.match(response.headers.get('content-security-policy') ?? '', /frame-ancestors 'self'/)
+  assert.match(response.headers.get('strict-transport-security') ?? '', /max-age=\d+/)
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff')
+  assert.equal(response.headers.get('x-frame-options'), 'SAMEORIGIN')
+  assert.equal(response.headers.get('referrer-policy'), 'no-referrer')
+  assert.equal(response.headers.get('cross-origin-opener-policy'), 'same-origin')
+  assert.equal(response.headers.get('cross-origin-resource-policy'), 'same-origin')
+  assert.equal(response.headers.get('x-powered-by'), null)
+}
+
 async function createWithVersions(baseUrl: string, name: string, count: number): Promise<string> {
   const created = await postPdf(baseUrl, 'a', name, pdfBytes(`${name} v1`))
   assert.equal(created.status, 201)

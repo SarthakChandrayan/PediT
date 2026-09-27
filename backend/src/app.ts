@@ -1,5 +1,6 @@
 import cors from 'cors'
 import express, { type Express } from 'express'
+import helmet from 'helmet'
 import type { AuthIdentity } from './lib/authIdentity.js'
 import type { DocumentsDb } from './lib/documentsDb.js'
 import { documentsDb } from './lib/documentsDb.js'
@@ -7,6 +8,7 @@ import { r2PdfStorage, type PdfStorage } from './lib/pdfStorage.js'
 import { prisma } from './lib/prisma.js'
 import { trustProxySetting } from './lib/trustProxy.js'
 import { verifyAuthorizationHeader } from './lib/verifyNeonToken.js'
+import { errorHandler } from './middleware/errorHandler.js'
 import {
   documentRateLimiter,
   documentRateLimitsFromEnv,
@@ -14,6 +16,10 @@ import {
 } from './middleware/rateLimit.js'
 import { requireUser } from './middleware/requireUser.js'
 import { createDocumentsRouter } from './routes/documents.js'
+
+/** PDFs arrive as multipart and are capped by Multer; these only bound non-file request bodies. */
+const JSON_BODY_LIMIT = '100kb'
+const URLENCODED_BODY_LIMIT = '100kb'
 
 export type CreateAppOptions = {
   db?: DocumentsDb
@@ -33,12 +39,14 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   app.set('trust proxy', options.trustProxy ?? trustProxySetting())
 
+  app.use(helmet())
   app.use(
     cors({
       origin,
     }),
   )
-  app.use(express.json({ limit: '1mb' }))
+  app.use(express.json({ limit: JSON_BODY_LIMIT }))
+  app.use(express.urlencoded({ extended: false, limit: URLENCODED_BODY_LIMIT }))
   app.use(
     '/api/documents',
     documentRateLimiter(rateLimits),
@@ -62,6 +70,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
       })
     }
   })
+
+  app.use(errorHandler)
 
   return app
 }

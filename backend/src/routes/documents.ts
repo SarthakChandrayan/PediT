@@ -36,30 +36,20 @@ export function createDocumentsRouter(
   storage: PdfStorage = r2PdfStorage,
 ): Router {
   const router = Router()
-  router.post('/', receivePdf, (request, response) => {
-    void createDocument(db, storage, request, response)
-  })
-  router.get('/', (request, response) => {
-    void listDocuments(db, request, response)
-  })
-  router.post('/:documentId/versions', receivePdf, (request, response) => {
-    void createDocumentVersion(db, storage, request, response)
-  })
-  router.get('/:documentId/versions/:version/file', (request, response) => {
-    void sendVersionFile(db, storage, request, response)
-  })
-  router.get('/:documentId/versions', (request, response) => {
-    void listVersions(db, request, response)
-  })
-  router.get('/:id/file', (request, response) => {
-    void sendDocumentFile(db, storage, request, response)
-  })
-  router.get('/:id', (request, response) => {
-    void readDocument(db, request, response)
-  })
-  router.delete('/:documentId', (request, response) => {
-    void deleteDocument(db, storage, request, response)
-  })
+  router.post('/', receivePdf, (request, response) => createDocument(db, storage, request, response))
+  router.get('/', (request, response) => listDocuments(db, request, response))
+  router.post('/:documentId/versions', receivePdf, (request, response) =>
+    createDocumentVersion(db, storage, request, response),
+  )
+  router.get('/:documentId/versions/:version/file', (request, response) =>
+    sendVersionFile(db, storage, request, response),
+  )
+  router.get('/:documentId/versions', (request, response) => listVersions(db, request, response))
+  router.get('/:id/file', (request, response) => sendDocumentFile(db, storage, request, response))
+  router.get('/:id', (request, response) => readDocument(db, request, response))
+  router.delete('/:documentId', (request, response) =>
+    deleteDocument(db, storage, request, response),
+  )
   router.use(handleUploadError)
   return router
 }
