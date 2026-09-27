@@ -21,7 +21,7 @@ export type DocumentsDb = {
       data: {
         name: string
         userId: string
-        versions: { create: { version: number; fileUrl: string } }
+        versions: { create: { version: number; fileUrl: string; sizeBytes: bigint } }
       }
       include: { versions: true }
     }): Promise<{
@@ -30,9 +30,11 @@ export type DocumentsDb = {
       createdAt: Date
       versions: Array<{ version: number; fileUrl: string }>
     }>
+    count(args: { where: { userId: string } }): Promise<number>
     findMany(args: {
       where: { userId: string }
       orderBy: { createdAt: 'desc' }
+      take: number
       select: {
         id: true
         name: true
@@ -60,6 +62,7 @@ export type DocumentsDb = {
       select?: { id: true } | {
         versions: {
           orderBy: { version: 'desc' }
+          take?: number
           select: {
             id: true
             version: true
@@ -109,12 +112,17 @@ export type DocumentsDb = {
       fileUrl: string
       document: { name: string }
     } | null>
+    count(args: { where: { documentId: string } }): Promise<number>
     aggregate(args: {
-      where: { documentId: string }
-      _max: { version: true }
-    }): Promise<{ _max: { version: number | null } }>
+      where: { documentId: string } | { document: { userId: string } }
+      _max?: { version: true }
+      _sum?: { sizeBytes: true }
+    }): Promise<{
+      _max?: { version: number | null }
+      _sum?: { sizeBytes: bigint | null }
+    }>
     create(args: {
-      data: { documentId: string; version: number; fileUrl: string }
+      data: { documentId: string; version: number; fileUrl: string; sizeBytes: bigint }
     }): Promise<{
       id: string
       documentId: string
@@ -123,6 +131,11 @@ export type DocumentsDb = {
       createdAt: Date
     }>
   }
+  $transaction<T>(run: (tx: DocumentsTx) => Promise<T>): Promise<T>
+}
+
+export type DocumentsTx = Pick<DocumentsDb, 'document' | 'documentVersion'> & {
+  $queryRaw(query: TemplateStringsArray, ...values: unknown[]): Promise<unknown>
 }
 
 export const documentsDb = prisma as unknown as DocumentsDb

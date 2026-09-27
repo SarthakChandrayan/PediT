@@ -32,6 +32,7 @@ model DocumentVersion {
   documentId String
   version    Int
   fileUrl    String
+  sizeBytes  BigInt   @default(0)
   createdAt  DateTime @default(now())
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 

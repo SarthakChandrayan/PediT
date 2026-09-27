@@ -15,6 +15,15 @@ import {
 } from '../lib/documentStorage.js'
 import { isMissingObject, pipeStoredPdf } from '../lib/pdfResponse.js'
 import { r2PdfStorage, type PdfStorage } from '../lib/pdfStorage.js'
+import {
+  LIST_LIMIT,
+  QuotaExceededError,
+  assertDocumentQuota,
+  assertVersionQuota,
+  documentQuotaRejection,
+  lockUserQuota,
+  versionQuotaRejection,
+} from '../lib/storageQuota.js'
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -25,9 +34,14 @@ const upload = multer({
       callback(null, storedPdfName())
     },
   }),
+  /** Uploads carry only the `file` part; any text field or extra part is rejected before it is buffered. */
   limits: {
     fileSize: maxPdfBytes(),
     files: 1,
+    fields: 0,
+    parts: 1,
+    fieldSize: 1024,
+    headerPairs: 20,
   },
 })
 
@@ -68,6 +82,7 @@ async function listDocuments(
   const documents = await db.document.findMany({
     where: { userId: ownerId },
     orderBy: { createdAt: 'desc' },
+    take: LIST_LIMIT,
     select: {
       id: true,
       name: true,
@@ -146,25 +161,37 @@ async function createDocument(
     return
   }
 
+  const quotaRejection = await documentQuotaRejection(db, ownerId, file.size)
+  if (quotaRejection) {
+    await removeStoredFile(file.path)
+    response.status(413).json({ error: quotaRejection })
+    return
+  }
+
   const fileUrl = storedFileUrl(file.filename)
 
   try {
     await storage.uploadPdf(file.path, fileUrl)
 
-    const document = await db.document.create({
-      data: {
-        name: displayFileName(file.originalname),
-        userId: ownerId,
-        versions: {
-          create: {
-            version: 1,
-            fileUrl,
+    const document = await db.$transaction(async (tx) => {
+      await lockUserQuota(tx, ownerId)
+      await assertDocumentQuota(tx, ownerId, file.size)
+      return tx.document.create({
+        data: {
+          name: displayFileName(file.originalname),
+          userId: ownerId,
+          versions: {
+            create: {
+              version: 1,
+              fileUrl,
+              sizeBytes: BigInt(file.size),
+            },
           },
         },
-      },
-      include: {
-        versions: true,
-      },
+        include: {
+          versions: true,
+        },
+      })
     })
 
     const version = document.versions[0]
@@ -184,10 +211,14 @@ async function createDocument(
       createdAt: document.createdAt,
       fileUrl: version.fileUrl,
     })
-  } catch {
+  } catch (error) {
     await storage.deletePdf(fileUrl).catch(() => undefined)
     await removeStoredFile(file.path)
 
+    if (error instanceof QuotaExceededError) {
+      response.status(413).json({ error: error.message })
+      return
+    }
     console.error('Document upload failed.')
     response.status(500).json({ error: 'The document could not be saved.' })
   }
@@ -237,12 +268,20 @@ async function createDocumentVersion(
     response.status(404).json({ error: 'Document not found.' })
     return
   }
+
+  const quotaRejection = await versionQuotaRejection(db, ownerId, documentId, file.size)
+  if (quotaRejection) {
+    await removeStoredFile(file.path)
+    response.status(413).json({ error: quotaRejection })
+    return
+  }
+
   const fileUrl = storedFileUrl(file.filename)
 
   try {
     await storage.uploadPdf(file.path, fileUrl)
 
-    const saved = await insertNextVersion(db, documentId, fileUrl)
+    const saved = await insertNextVersion(db, ownerId, documentId, fileUrl, file.size)
     await removeStoredFile(file.path)
 
     response.status(201).json({
@@ -256,6 +295,10 @@ async function createDocumentVersion(
     await storage.deletePdf(fileUrl).catch(() => undefined)
     await removeStoredFile(file.path)
 
+    if (error instanceof QuotaExceededError) {
+      response.status(413).json({ error: error.message })
+      return
+    }
     if (isPrismaCode(error, 'P2003')) {
       response.status(404).json({ error: 'Document not found.' })
       return
@@ -287,6 +330,7 @@ async function listVersions(
     select: {
       versions: {
         orderBy: { version: 'desc' },
+        take: LIST_LIMIT,
         select: {
           id: true,
           version: true,
@@ -559,22 +603,35 @@ function routeId(value: string | string[] | undefined): string | null {
 
 const VERSION_INSERT_ATTEMPTS = 8
 
-/** Allocates max(version)+1. A unique conflict means another save won that number, so the insert is retried. */
-async function insertNextVersion(db: DocumentsDb, documentId: string, fileUrl: string) {
+/**
+ * Allocates max(version)+1 under the owner's quota lock. A unique conflict means another save won
+ * that number, so the insert is retried.
+ */
+async function insertNextVersion(
+  db: DocumentsDb,
+  ownerId: string,
+  documentId: string,
+  fileUrl: string,
+  sizeBytes: number,
+) {
   for (let attempt = 0; attempt < VERSION_INSERT_ATTEMPTS; attempt += 1) {
-    const latest = await db.documentVersion.aggregate({
-      where: { documentId },
-      _max: { version: true },
-    })
-    const nextVersion = (latest._max.version ?? 0) + 1
-
     try {
-      return await db.documentVersion.create({
-        data: {
-          documentId,
-          version: nextVersion,
-          fileUrl,
-        },
+      return await db.$transaction(async (tx) => {
+        await lockUserQuota(tx, ownerId)
+        await assertVersionQuota(tx, ownerId, documentId, sizeBytes)
+        const latest = await tx.documentVersion.aggregate({
+          where: { documentId },
+          _max: { version: true },
+        })
+        const nextVersion = (latest._max?.version ?? 0) + 1
+        return tx.documentVersion.create({
+          data: {
+            documentId,
+            version: nextVersion,
+            fileUrl,
+            sizeBytes: BigInt(sizeBytes),
+          },
+        })
       })
     } catch (error) {
       const retry = isPrismaCode(error, 'P2002') && attempt < VERSION_INSERT_ATTEMPTS - 1

@@ -1,13 +1,25 @@
 import assert from 'node:assert/strict'
+import { readdir, readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import type { Express } from 'express'
 import { createApp, type CreateAppOptions } from '../src/app.js'
 import type { ApplicationUser, AuthIdentity } from '../src/lib/authIdentity.js'
 import type { DocumentsDb } from '../src/lib/documentsDb.js'
 import { resolveApplicationUser } from '../src/lib/resolveUser.js'
-import { removeStoredFile, resolveStoredFile } from '../src/lib/documentStorage.js'
+import {
+  DOCUMENTS_DIRECTORY,
+  removeStoredFile,
+  resolveStoredFile,
+} from '../src/lib/documentStorage.js'
 import type { PdfStorage } from '../src/lib/pdfStorage.js'
+import {
+  LIST_LIMIT,
+  MAX_DOCUMENTS_PER_USER,
+  MAX_STORAGE_BYTES_PER_USER,
+  MAX_VERSIONS_PER_DOCUMENT,
+} from '../src/lib/storageQuota.js'
 import { trustProxySetting } from '../src/lib/trustProxy.js'
 import { documentRateLimitsFromEnv, type DocumentRateLimits } from '../src/middleware/rateLimit.js'
 import { createMemoryPdfStorage } from './memoryPdfStorage.js'
@@ -39,10 +51,15 @@ describe('document authorization', () => {
     const db = memoryDb()
     const { baseUrl, close } = await listen(appFor(db))
     try {
-      const created = await postPdf(baseUrl, 'a', 'owned.pdf', pdfBytes('owned'), {
+      const spoofed = await postPdf(baseUrl, 'a', 'owned.pdf', pdfBytes('owned'), {
         email: USER_B.email,
         userId: 'client-supplied-user',
       })
+      assert.equal(spoofed.status, 400)
+      assert.deepEqual(await spoofed.json(), { error: 'Upload one PDF file.' })
+      assert.equal(db.documents.length, 0)
+
+      const created = await postPdf(baseUrl, 'a', 'owned.pdf', pdfBytes('owned'))
       assert.equal(created.status, 201)
       const document = (await created.json()) as { id: string; version: number }
       assert.equal(document.version, 1)
@@ -508,7 +525,9 @@ describe('document deletion', () => {
           return
         }
         injected = true
-        await db.documentVersion.create({ data: { documentId: id, version: 2, fileUrl: lateKey } })
+        await db.documentVersion.create({
+          data: { documentId: id, version: 2, fileUrl: lateKey, sizeBytes: 0n },
+        })
       }
 
       const deleted = await deleteDocument(baseUrl, id, 'a')
@@ -538,6 +557,274 @@ describe('document deletion', () => {
       await tracked.storage.getPdf(sharedKey!)
     } finally {
       remember(db)
+      await close()
+    }
+  })
+})
+
+describe('storage quotas', () => {
+  const DOCUMENT_LIMIT_ERROR = {
+    error: 'You can store up to 50 documents. Delete a document to upload another.',
+  }
+  const VERSION_LIMIT_ERROR = { error: 'A document can have up to 50 versions.' }
+  const STORAGE_LIMIT_ERROR = {
+    error: 'This upload would exceed your 2 GB storage limit. Delete documents to free up space.',
+  }
+
+  it('accepts the 50th document and rejects the 51st before storing it', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    seedDocuments(db, userId, MAX_DOCUMENTS_PER_USER - 1)
+    const tracked = quotaStorage()
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const fiftieth = await postPdf(baseUrl, 'a', 'fiftieth.pdf', pdfBytes('fiftieth'))
+      assert.equal(fiftieth.status, 201)
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER)
+
+      const rejected = await postPdf(baseUrl, 'a', 'fifty-first.pdf', pdfBytes('fifty-first'))
+      assert.equal(rejected.status, 413)
+      assert.deepEqual(await rejected.json(), DOCUMENT_LIMIT_ERROR)
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER)
+      assert.equal(tracked.uploaded.length, 1)
+      assert.deepEqual(tracked.deleted, [])
+
+      const otherUser = await postPdf(baseUrl, 'b', 'unaffected.pdf', pdfBytes('unaffected'))
+      assert.equal(otherUser.status, 201)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('accepts the 50th version and rejects the 51st before storing it', async () => {
+    const db = memoryDb()
+    const tracked = quotaStorage()
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const created = await postPdf(baseUrl, 'a', 'versioned.pdf', pdfBytes('v1'))
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+      seedVersions(db, id, MAX_VERSIONS_PER_DOCUMENT - 2)
+
+      const fiftieth = await postPdf(baseUrl, 'a', 'v50.pdf', pdfBytes('v50'), undefined, id)
+      assert.equal(fiftieth.status, 201)
+      assert.equal(((await fiftieth.json()) as { version: number }).version, MAX_VERSIONS_PER_DOCUMENT)
+
+      const rejected = await postPdf(baseUrl, 'a', 'v51.pdf', pdfBytes('v51'), undefined, id)
+      assert.equal(rejected.status, 413)
+      assert.deepEqual(await rejected.json(), VERSION_LIMIT_ERROR)
+      assert.equal(versionKeys(db, id).length, MAX_VERSIONS_PER_DOCUMENT)
+      assert.equal(tracked.uploaded.length, 2)
+      assert.deepEqual(tracked.deleted, [])
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('accepts uploads up to exactly 2 GB and rejects one that would exceed it before storing it', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    const [seededId] = seedDocuments(db, userId, 1, MAX_STORAGE_BYTES_PER_USER - 1000n)
+    const tracked = quotaStorage()
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const below = pdfBytes('below the limit')
+      const accepted = await postPdf(baseUrl, 'a', 'below.pdf', below)
+      assert.equal(accepted.status, 201)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER - 1000n + BigInt(below.byteLength))
+
+      const remaining = Number(MAX_STORAGE_BYTES_PER_USER - usedBytes(db, userId))
+      const exact = await postPdf(baseUrl, 'a', 'exact.pdf', paddedPdf('exact fit', remaining))
+      assert.equal(exact.status, 201)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER)
+
+      const documentsBefore = db.documents.length
+      const overDocument = await postPdf(baseUrl, 'a', 'over.pdf', pdfBytes('over'))
+      assert.equal(overDocument.status, 413)
+      assert.deepEqual(await overDocument.json(), STORAGE_LIMIT_ERROR)
+      const overVersion = await postPdf(baseUrl, 'a', 'over-v2.pdf', pdfBytes('over'), undefined, seededId)
+      assert.equal(overVersion.status, 413)
+      assert.deepEqual(await overVersion.json(), STORAGE_LIMIT_ERROR)
+
+      assert.equal(db.documents.length, documentsBefore)
+      assert.equal(versionKeys(db, seededId!).length, 1)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER)
+      assert.equal(tracked.uploaded.length, 2)
+      assert.deepEqual(tracked.deleted, [])
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('releases document and storage quota when a document is deleted', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    const [largeId] = seedDocuments(db, userId, 1, MAX_STORAGE_BYTES_PER_USER)
+    const [smallId] = seedDocuments(db, userId, MAX_DOCUMENTS_PER_USER - 1)
+    const tracked = quotaStorage()
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    const bytes = pdfBytes('after delete')
+    try {
+      const atDocumentLimit = await postPdf(baseUrl, 'a', 'blocked.pdf', bytes)
+      assert.equal(atDocumentLimit.status, 413)
+      assert.deepEqual(await atDocumentLimit.json(), DOCUMENT_LIMIT_ERROR)
+
+      assert.equal((await deleteDocument(baseUrl, smallId!, 'a')).status, 204)
+      const atStorageLimit = await postPdf(baseUrl, 'a', 'blocked.pdf', bytes)
+      assert.equal(atStorageLimit.status, 413)
+      assert.deepEqual(await atStorageLimit.json(), STORAGE_LIMIT_ERROR)
+
+      assert.equal((await deleteDocument(baseUrl, largeId!, 'a')).status, 204)
+      const accepted = await postPdf(baseUrl, 'a', 'accepted.pdf', bytes)
+      assert.equal(accepted.status, 201)
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER - 1)
+      assert.equal(usedBytes(db, userId), BigInt(bytes.byteLength))
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('does not count a failed storage upload against the quota', async (t) => {
+    t.mock.method(console, 'error', () => undefined)
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    const bytes = pdfBytes('retry after failure')
+    seedDocuments(db, userId, MAX_DOCUMENTS_PER_USER - 2)
+    seedDocuments(db, userId, 1, MAX_STORAGE_BYTES_PER_USER - BigInt(bytes.byteLength))
+    const tracked = quotaStorage()
+    tracked.failUploads = 1
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const failed = await postPdf(baseUrl, 'a', 'flaky.pdf', bytes)
+      assert.equal(failed.status, 500)
+      assert.deepEqual(await failed.json(), { error: 'The document could not be saved.' })
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER - 1)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER - BigInt(bytes.byteLength))
+
+      const retried = await postPdf(baseUrl, 'a', 'flaky.pdf', bytes)
+      assert.equal(retried.status, 201)
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('lets only one of two simultaneous uploads take the last document slot', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    seedDocuments(db, userId, MAX_DOCUMENTS_PER_USER - 1)
+    const tracked = quotaStorage()
+    tracked.holdUntil = 2
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const responses = await Promise.all([
+        postPdf(baseUrl, 'a', 'racer-1.pdf', pdfBytes('racer 1')),
+        postPdf(baseUrl, 'a', 'racer-2.pdf', pdfBytes('racer 2')),
+      ])
+      await assertOneQuotaWinner(db, tracked, responses, DOCUMENT_LIMIT_ERROR)
+      assert.equal(ownedDocuments(db, userId).length, MAX_DOCUMENTS_PER_USER)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('lets only one of two simultaneous uploads use the last storage bytes', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    const bytes = pdfBytes('racing for bytes')
+    seedDocuments(db, userId, 1, MAX_STORAGE_BYTES_PER_USER - BigInt(bytes.byteLength))
+    const tracked = quotaStorage()
+    tracked.holdUntil = 2
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const responses = await Promise.all([
+        postPdf(baseUrl, 'a', 'bytes-1.pdf', bytes),
+        postPdf(baseUrl, 'a', 'bytes-2.pdf', bytes),
+      ])
+      await assertOneQuotaWinner(db, tracked, responses, STORAGE_LIMIT_ERROR)
+      assert.equal(usedBytes(db, userId), MAX_STORAGE_BYTES_PER_USER)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('lets only one of two simultaneous saves become the 50th version', async () => {
+    const db = memoryDb()
+    const tracked = quotaStorage()
+    const { baseUrl, close } = await listen(quotaApp(db, tracked.storage))
+    try {
+      const created = await postPdf(baseUrl, 'a', 'versioned.pdf', pdfBytes('v1'))
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+      seedVersions(db, id, MAX_VERSIONS_PER_DOCUMENT - 2)
+      tracked.uploaded.length = 0
+      tracked.holdUntil = 2
+
+      const responses = await Promise.all([
+        postPdf(baseUrl, 'a', 'save-1.pdf', pdfBytes('save 1'), undefined, id),
+        postPdf(baseUrl, 'a', 'save-2.pdf', pdfBytes('save 2'), undefined, id),
+      ])
+      await assertOneQuotaWinner(db, tracked, responses, VERSION_LIMIT_ERROR)
+      assert.equal(versionKeys(db, id).length, MAX_VERSIONS_PER_DOCUMENT)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('returns every document and version up to the quota and bounds larger legacy lists', async () => {
+    const db = memoryDb()
+    const userId = seedUser(db, USER_A)
+    const [versionedId] = seedDocuments(db, userId, MAX_DOCUMENTS_PER_USER)
+    seedVersions(db, versionedId!, MAX_VERSIONS_PER_DOCUMENT - 1)
+    const takes: number[] = []
+    const findMany = db.document.findMany
+    db.document.findMany = (args) => {
+      takes.push(args.take)
+      return findMany(args)
+    }
+    const { baseUrl, close } = await listen(quotaApp(db, quotaStorage().storage))
+    const list = async (path: string) => {
+      const response = await fetch(`${baseUrl}/api/documents${path}`, { headers: auth('a') })
+      assert.equal(response.status, 200)
+      return (await response.json()) as Array<Record<string, unknown>>
+    }
+    try {
+      assert.ok(LIST_LIMIT >= MAX_DOCUMENTS_PER_USER && LIST_LIMIT >= MAX_VERSIONS_PER_DOCUMENT)
+
+      const documents = await list('')
+      assert.equal(documents.length, MAX_DOCUMENTS_PER_USER)
+      assert.deepEqual(Object.keys(documents[0]!).sort(), [
+        'createdAt',
+        'fileUrl',
+        'id',
+        'name',
+        'updatedAt',
+        'version',
+      ])
+      assert.deepEqual(takes, [LIST_LIMIT])
+
+      const versions = await list(`/${versionedId}/versions`)
+      assert.equal(versions.length, MAX_VERSIONS_PER_DOCUMENT)
+      assert.deepEqual(Object.keys(versions[0]!).sort(), ['createdAt', 'fileUrl', 'id', 'version'])
+      assert.deepEqual(
+        versions.map((item) => item.version),
+        Array.from({ length: MAX_VERSIONS_PER_DOCUMENT }, (_, index) => MAX_VERSIONS_PER_DOCUMENT - index),
+      )
+
+      seedDocuments(db, userId, LIST_LIMIT)
+      seedVersions(db, versionedId!, LIST_LIMIT)
+      assert.equal((await list('')).length, LIST_LIMIT)
+      assert.equal((await list(`/${versionedId}/versions`)).length, LIST_LIMIT)
+    } finally {
       await close()
     }
   })
@@ -682,6 +969,80 @@ describe('production hardening', () => {
     }
   })
 
+  it('rejects multipart uploads with text fields or extra parts without storing anything', async () => {
+    const db = memoryDb()
+    const memoryStorage = createMemoryPdfStorage()
+    const uploaded: string[] = []
+    const pdfStorage: PdfStorage = {
+      async uploadPdf(filePath, objectKey) {
+        await memoryStorage.uploadPdf(filePath, objectKey)
+        uploaded.push(objectKey)
+      },
+      getPdf: (objectKey) => memoryStorage.getPdf(objectKey),
+      deletePdf: (objectKey) => memoryStorage.deletePdf(objectKey),
+    }
+    const { baseUrl, close } = await listen(appFor(db, { pdfStorage }))
+    const marker = 'rejected multipart upload'
+    const pdf = () => new Blob([new Uint8Array(pdfBytes(marker))], { type: PDF_MIME_TYPE })
+    const send = (route: string, build: (form: FormData) => void) => {
+      const form = new FormData()
+      build(form)
+      return fetch(`${baseUrl}${route}`, { method: 'POST', headers: auth('a'), body: form })
+    }
+    try {
+      const created = await postPdf(baseUrl, 'a', 'base.pdf', pdfBytes('base'))
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+
+      const rejected = [
+        await send('/api/documents', (form) => {
+          form.append('file', pdf(), 'field-after.pdf')
+          form.append('userId', 'client-supplied-user')
+        }),
+        await send('/api/documents', (form) => {
+          form.append('email', USER_B.email)
+          form.append('file', pdf(), 'field-before.pdf')
+        }),
+        await send('/api/documents', (form) => {
+          for (let index = 0; index < 64; index += 1) {
+            form.append(`field${index}`, 'x'.repeat(64 * 1024))
+          }
+        }),
+        await send('/api/documents', (form) => {
+          form.append('file', pdf(), 'first.pdf')
+          form.append('file', pdf(), 'second.pdf')
+        }),
+        await send(`/api/documents/${id}/versions`, (form) => {
+          form.append('file', pdf(), 'version.pdf')
+          form.append('note', 'x'.repeat(2048))
+        }),
+      ]
+      for (const response of rejected) {
+        assert.equal(response.status, 400)
+        assert.deepEqual(await response.json(), { error: 'Upload one PDF file.' })
+      }
+
+      assert.equal(db.documents.length, 1)
+      assert.equal(db.documents[0]?.versions.length, 1)
+      assert.equal(uploaded.length, 1)
+      for (const name of await readdir(DOCUMENTS_DIRECTORY)) {
+        const contents = await readFile(join(DOCUMENTS_DIRECTORY, name)).catch(() => Buffer.alloc(0))
+        assert.equal(contents.includes(marker), false, `temp upload left behind: ${name}`)
+      }
+
+      const saved = await postPdf(baseUrl, 'a', 'edited.pdf', pdfBytes('edited'), undefined, id)
+      assert.equal(saved.status, 201)
+      assert.equal(((await saved.json()) as { version: number }).version, 2)
+      assert.equal(uploaded.length, 2)
+
+      const health = await fetch(`${baseUrl}/health`)
+      assert.equal(health.status, 200)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
   it('returns a generic 500 for unexpected errors without exposing internals', async (t) => {
     const logged = t.mock.method(console, 'error', () => undefined)
     const secret =
@@ -809,6 +1170,144 @@ function limits(overrides: Partial<DocumentRateLimits>): DocumentRateLimits {
   return { windowMs: 60_000, uploadLimit: 100, versionLimit: 100, readLimit: 100, ...overrides }
 }
 
+function quotaApp(db: MemoryDb, pdfStorage: PdfStorage): Express {
+  return appFor(db, {
+    pdfStorage,
+    rateLimits: limits({ uploadLimit: 1000, versionLimit: 1000, readLimit: 1000 }),
+  })
+}
+
+/** Memory storage that records uploads and deletes, can fail uploads, and can hold uploads until several arrive. */
+function quotaStorage() {
+  const base = createMemoryPdfStorage()
+  const held: Array<() => void> = []
+  const tracked = {
+    uploaded: [] as string[],
+    deleted: [] as string[],
+    failUploads: 0,
+    holdUntil: 0,
+    storage: {
+      async uploadPdf(filePath, objectKey) {
+        if (tracked.failUploads > 0) {
+          tracked.failUploads -= 1
+          throw new Error('Storage is unavailable.')
+        }
+        await base.uploadPdf(filePath, objectKey)
+        tracked.uploaded.push(objectKey)
+        if (tracked.holdUntil > 0) {
+          await new Promise<void>((resolve) => {
+            held.push(resolve)
+            if (held.length === tracked.holdUntil) {
+              tracked.holdUntil = 0
+              for (const release of held.splice(0)) {
+                release()
+              }
+            }
+          })
+        }
+      },
+      getPdf: (objectKey) => base.getPdf(objectKey),
+      async deletePdf(objectKey) {
+        await base.deletePdf(objectKey)
+        tracked.deleted.push(objectKey)
+      },
+    } satisfies PdfStorage,
+  }
+  return tracked
+}
+
+/** Both uploads passed the pre-check and reached storage; the locked re-check must keep exactly one. */
+async function assertOneQuotaWinner(
+  db: MemoryDb,
+  tracked: ReturnType<typeof quotaStorage>,
+  responses: Response[],
+  expectedError: { error: string },
+) {
+  assert.deepEqual(
+    responses.map((response) => response.status).sort((left, right) => left - right),
+    [201, 413],
+  )
+  const loser = responses.find((response) => response.status === 413)!
+  assert.deepEqual(await loser.json(), expectedError)
+
+  assert.equal(tracked.uploaded.length, 2)
+  assert.equal(tracked.deleted.length, 1)
+  const kept = tracked.uploaded.filter((key) => !tracked.deleted.includes(key))
+  const referenced = new Set(db.documents.flatMap((item) => item.versions).map((item) => item.fileUrl))
+  assert.equal(kept.length, 1)
+  assert.equal(referenced.has(kept[0]!), true)
+  assert.equal(referenced.has(tracked.deleted[0]!), false)
+  assert.equal(db.quotaLocks.length >= 2, true)
+}
+
+let seededSequence = 0
+
+function seedUser(db: MemoryDb, identity: AuthIdentity): string {
+  const id = `seeded-${identity.authUserId}`
+  db.users.push({ id, email: identity.email, authUserId: identity.authUserId })
+  return id
+}
+
+/** Adds documents with one version each directly to the store, as if they were uploaded earlier. */
+function seedDocuments(db: MemoryDb, userId: string, count: number, sizeBytes = 0n): string[] {
+  const ids: string[] = []
+  for (let index = 0; index < count; index += 1) {
+    seededSequence += 1
+    const id = `seeded-document-${seededSequence}`
+    db.documents.push({
+      id,
+      userId,
+      name: `${id}.pdf`,
+      createdAt: new Date(),
+      versions: [
+        {
+          id: `${id}-v1`,
+          documentId: id,
+          version: 1,
+          fileUrl: `documents/${id}-v1.pdf`,
+          sizeBytes,
+          createdAt: new Date(),
+        },
+      ],
+    })
+    ids.push(id)
+  }
+  return ids
+}
+
+function seedVersions(db: MemoryDb, documentId: string, count: number, sizeBytes = 0n) {
+  const document = db.documents.find((item) => item.id === documentId)
+  assert.ok(document)
+  for (let index = 0; index < count; index += 1) {
+    seededSequence += 1
+    const id = `seeded-version-${seededSequence}`
+    document.versions.push({
+      id,
+      documentId,
+      version: Math.max(...document.versions.map((item) => item.version)) + 1,
+      fileUrl: `documents/${id}.pdf`,
+      sizeBytes,
+      createdAt: new Date(),
+    })
+  }
+}
+
+function ownedDocuments(db: MemoryDb, userId: string): MemoryDocument[] {
+  return db.documents.filter((item) => item.userId === userId)
+}
+
+function usedBytes(db: MemoryDb, userId: string): bigint {
+  return ownedDocuments(db, userId)
+    .flatMap((item) => item.versions)
+    .reduce((sum, item) => sum + item.sizeBytes, 0n)
+}
+
+function paddedPdf(label: string, size: number): Buffer {
+  const header = pdfBytes(label)
+  assert.ok(size >= header.byteLength)
+  return Buffer.concat([header, Buffer.alloc(size - header.byteLength, 0x20)])
+}
+
 function appFor(db: DocumentsDb, overrides: Partial<CreateAppOptions> = {}): Express {
   return createApp({
     db,
@@ -867,6 +1366,7 @@ type MemoryVersion = {
   documentId: string
   version: number
   fileUrl: string
+  sizeBytes: bigint
   createdAt: Date
 }
 type MemoryDocument = {
@@ -877,18 +1377,32 @@ type MemoryDocument = {
   versions: MemoryVersion[]
 }
 
-function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocument[] } {
+type MemoryDb = DocumentsDb & {
+  users: MemoryUser[]
+  documents: MemoryDocument[]
+  quotaLocks: string[]
+}
+
+/** Yields to the event loop so concurrent requests interleave between quota reads and inserts. */
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
+
+function memoryDb(): MemoryDb {
   const users: MemoryUser[] = []
   const documents: MemoryDocument[] = []
+  const quotaLocks: string[] = []
+  const userLocks = new Map<string, Promise<void>>()
   let sequence = 0
   const nextId = (prefix: string) => {
     sequence += 1
     return `${prefix}-${sequence}`
   }
+  const ownedVersions = (userId: string) =>
+    documents.filter((item) => item.userId === userId).flatMap((item) => item.versions)
 
-  const db: DocumentsDb & { users: MemoryUser[]; documents: MemoryDocument[] } = {
+  const db: MemoryDb = {
     users,
     documents,
+    quotaLocks,
     user: {
       async findUnique({ where }) {
         if ('authUserId' in where) {
@@ -934,11 +1448,13 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
     },
     document: {
       async create({ data }) {
+        await tick()
         const version: MemoryVersion = {
           id: nextId('version'),
           documentId: '',
           version: data.versions.create.version,
           fileUrl: data.versions.create.fileUrl,
+          sizeBytes: data.versions.create.sizeBytes,
           createdAt: new Date(),
         }
         const document: MemoryDocument = {
@@ -960,10 +1476,15 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
           })),
         }
       },
-      async findMany({ where }) {
+      async count({ where }) {
+        await tick()
+        return documents.filter((item) => item.userId === where.userId).length
+      },
+      async findMany({ where, take }) {
         return documents
           .filter((item) => item.userId === where.userId)
           .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+          .slice(0, take)
           .map((document) => {
             const latest = [...document.versions].sort(
               (left, right) => right.version - left.version,
@@ -997,7 +1518,10 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
         if (args.select && 'versions' in args.select) {
           return {
             id: document.id,
-            versions: [...document.versions].sort((left, right) => right.version - left.version),
+            versions: [...document.versions]
+              .sort((left, right) => right.version - left.version)
+              .slice(0, args.select.versions.take)
+              .map(({ id, version, fileUrl, createdAt }) => ({ id, version, fileUrl, createdAt })),
           }
         }
         const latest = [...document.versions].sort((left, right) => right.version - left.version)[0]
@@ -1041,7 +1565,19 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
         }
         return { fileUrl: version.fileUrl, document: { name: document.name } }
       },
-      async aggregate({ where }) {
+      async count({ where }) {
+        await tick()
+        return documents.find((item) => item.id === where.documentId)?.versions.length ?? 0
+      },
+      async aggregate({ where, _sum }) {
+        await tick()
+        if ('document' in where) {
+          const total = ownedVersions(where.document.userId).reduce(
+            (sum, item) => sum + item.sizeBytes,
+            0n,
+          )
+          return _sum ? { _sum: { sizeBytes: total } } : {}
+        }
         const document = documents.find((item) => item.id === where.documentId)
         const version = document?.versions.reduce(
           (max, item) => Math.max(max, item.version),
@@ -1050,6 +1586,7 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
         return { _max: { version: version && version > 0 ? version : null } }
       },
       async create({ data }) {
+        await tick()
         const document = documents.find((item) => item.id === data.documentId)
         if (!document) {
           throw Object.assign(new Error('missing document'), { code: 'P2003' })
@@ -1062,11 +1599,40 @@ function memoryDb(): DocumentsDb & { users: MemoryUser[]; documents: MemoryDocum
           documentId: data.documentId,
           version: data.version,
           fileUrl: data.fileUrl,
+          sizeBytes: data.sizeBytes,
           createdAt: new Date(),
         }
         document.versions.push(version)
         return version
       },
+    },
+    /** Models the Postgres row lock: a second locker for the same user waits until the first transaction ends. */
+    async $transaction(run) {
+      const releases: Array<() => void> = []
+      const tx = {
+        document: db.document,
+        documentVersion: db.documentVersion,
+        async $queryRaw(_query: TemplateStringsArray, ...values: unknown[]) {
+          const userId = String(values[0])
+          const previous = userLocks.get(userId) ?? Promise.resolve()
+          let release: () => void = () => undefined
+          const held = new Promise<void>((resolve) => {
+            release = resolve
+          })
+          userLocks.set(userId, previous.then(() => held))
+          await previous
+          releases.push(release)
+          quotaLocks.push(userId)
+          return []
+        },
+      }
+      try {
+        return await run(tx)
+      } finally {
+        for (const release of releases) {
+          release()
+        }
+      }
     },
   }
 
