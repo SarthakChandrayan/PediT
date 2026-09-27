@@ -2,14 +2,17 @@ import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { after, describe, it } from 'node:test'
 import type { Express } from 'express'
-import { createApp } from '../src/app.js'
+import { createApp, type CreateAppOptions } from '../src/app.js'
 import type { ApplicationUser, AuthIdentity } from '../src/lib/authIdentity.js'
 import type { DocumentsDb } from '../src/lib/documentsDb.js'
 import { resolveApplicationUser } from '../src/lib/resolveUser.js'
 import { removeStoredFile, resolveStoredFile } from '../src/lib/documentStorage.js'
+import { trustProxySetting } from '../src/lib/trustProxy.js'
+import { documentRateLimitsFromEnv, type DocumentRateLimits } from '../src/middleware/rateLimit.js'
 import { createMemoryPdfStorage } from './memoryPdfStorage.js'
 
 const PDF_MIME_TYPE = 'application/pdf'
+const RATE_LIMITED = { error: 'Too many requests. Please try again later.' }
 const createdFiles: string[] = []
 
 const USER_A: AuthIdentity = { authUserId: 'auth-user-a', email: 'owner-a@example.com' }
@@ -199,7 +202,199 @@ describe('application user mapping', () => {
   })
 })
 
-function appFor(db: DocumentsDb): Express {
+describe('document rate limiting', () => {
+  it('allows uploads up to the limit and returns 429 JSON after it', async () => {
+    const db = memoryDb()
+    const { baseUrl, close } = await listen(appFor(db, { rateLimits: limits({ uploadLimit: 2 }) }))
+    try {
+      const first = await postPdf(baseUrl, 'a', 'one.pdf', pdfBytes('one'))
+      assert.equal(first.status, 201)
+      const second = await postPdf(baseUrl, 'a', 'two.pdf', pdfBytes('two'))
+      assert.equal(second.status, 201)
+
+      const limited = await postPdf(baseUrl, 'a', 'three.pdf', pdfBytes('three'))
+      assert.equal(limited.status, 429)
+      assert.match(limited.headers.get('content-type') ?? '', /application\/json/)
+      assert.deepEqual(await limited.json(), RATE_LIMITED)
+      assert.equal(db.documents.length, 2)
+
+      const listed = await fetch(`${baseUrl}/api/documents`, { headers: auth('a') })
+      assert.equal(listed.status, 200)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('limits version creation separately from uploads', async () => {
+    const db = memoryDb()
+    const app = appFor(db, { rateLimits: limits({ uploadLimit: 1, versionLimit: 2 }) })
+    const { baseUrl, close } = await listen(app)
+    try {
+      const created = await postPdf(baseUrl, 'a', 'base.pdf', pdfBytes('base'))
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+
+      for (const label of ['v2', 'v3']) {
+        const saved = await postPdf(baseUrl, 'a', `${label}.pdf`, pdfBytes(label), undefined, id)
+        assert.equal(saved.status, 201)
+      }
+
+      const limited = await postPdf(baseUrl, 'a', 'v4.pdf', pdfBytes('v4'), undefined, id)
+      assert.equal(limited.status, 429)
+      assert.deepEqual(await limited.json(), RATE_LIMITED)
+      assert.equal(db.documents.find((item) => item.id === id)?.versions.length, 3)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('limits document reads, lists, versions, and files with a shared read budget', async () => {
+    const db = memoryDb()
+    const app = appFor(db, { rateLimits: limits({ readLimit: 4 }) })
+    const { baseUrl, close } = await listen(app)
+    try {
+      const created = await postPdf(baseUrl, 'a', 'read.pdf', pdfBytes('read'))
+      assert.equal(created.status, 201)
+      const { id } = (await created.json()) as { id: string }
+
+      for (const path of ['', `/${id}`, `/${id}/file`, `/${id}/versions`]) {
+        const response = await fetch(`${baseUrl}/api/documents${path}`, { headers: auth('a') })
+        assert.equal(response.status, 200, path)
+        await response.arrayBuffer()
+      }
+
+      const limited = await fetch(`${baseUrl}/api/documents/${id}/versions/1/file`, {
+        headers: auth('a'),
+      })
+      assert.equal(limited.status, 429)
+      assert.deepEqual(await limited.json(), RATE_LIMITED)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('counts unauthenticated requests and keys on client IP, not user', async () => {
+    const db = memoryDb()
+    const { baseUrl, close } = await listen(appFor(db, { rateLimits: limits({ uploadLimit: 3 }) }))
+    try {
+      const anonymous = await fetch(`${baseUrl}/api/documents`, { method: 'POST' })
+      assert.equal(anonymous.status, 401)
+      const userA = await postPdf(baseUrl, 'a', 'a.pdf', pdfBytes('a'))
+      assert.equal(userA.status, 201)
+      const userB = await postPdf(baseUrl, 'b', 'b.pdf', pdfBytes('b'))
+      assert.equal(userB.status, 201)
+
+      const limitedAnonymous = await fetch(`${baseUrl}/api/documents`, { method: 'POST' })
+      assert.equal(limitedAnonymous.status, 429)
+      assert.deepEqual(await limitedAnonymous.json(), RATE_LIMITED)
+      const limitedUser = await postPdf(baseUrl, 'b', 'b2.pdf', pdfBytes('b2'))
+      assert.equal(limitedUser.status, 429)
+    } finally {
+      remember(db)
+      await close()
+    }
+  })
+
+  it('does not rate limit /health, even after document limits are exhausted', async () => {
+    const app = appFor(memoryDb(), { rateLimits: limits({ uploadLimit: 1, readLimit: 1 }) })
+    const { baseUrl, close } = await listen(app)
+    try {
+      const allowed = await fetch(`${baseUrl}/api/documents`, { headers: auth('a') })
+      assert.equal(allowed.status, 200)
+      await allowed.arrayBuffer()
+      const limited = await fetch(`${baseUrl}/api/documents`, { headers: auth('a') })
+      assert.equal(limited.status, 429)
+
+      for (let index = 0; index < 25; index += 1) {
+        const health = await fetch(`${baseUrl}/health`)
+        assert.equal(health.status, 200)
+        assert.deepEqual(await health.json(), { status: 'ok' })
+      }
+    } finally {
+      await close()
+    }
+  })
+
+  it('ignores X-Forwarded-For when no proxy is trusted', async () => {
+    const app = appFor(memoryDb(), { rateLimits: limits({ readLimit: 1 }), trustProxy: false })
+    const { baseUrl, close } = await listen(app)
+    try {
+      const first = await fetch(`${baseUrl}/api/documents`, {
+        headers: { ...auth('a'), 'x-forwarded-for': '198.51.100.1' },
+      })
+      assert.equal(first.status, 200)
+      const spoofed = await fetch(`${baseUrl}/api/documents`, {
+        headers: { ...auth('a'), 'x-forwarded-for': '198.51.100.2' },
+      })
+      assert.equal(spoofed.status, 429)
+    } finally {
+      await close()
+    }
+  })
+
+  it('uses only the proxy-appended address when one proxy hop is trusted', async () => {
+    const app = appFor(memoryDb(), { rateLimits: limits({ readLimit: 2 }), trustProxy: 1 })
+    const { baseUrl, close } = await listen(app)
+    const read = (forwardedFor: string) =>
+      fetch(`${baseUrl}/api/documents`, {
+        headers: { ...auth('a'), 'x-forwarded-for': forwardedFor },
+      })
+    try {
+      assert.equal((await read('10.0.0.1, 203.0.113.7')).status, 200)
+      assert.equal((await read('10.0.0.2, 203.0.113.7')).status, 200)
+      assert.equal((await read('10.0.0.3, 203.0.113.7')).status, 429)
+
+      assert.equal((await read('10.0.0.1, 203.0.113.8')).status, 200)
+    } finally {
+      await close()
+    }
+  })
+})
+
+describe('rate limit configuration', () => {
+  it('uses the documented defaults when no environment values are set', () => {
+    assert.deepEqual(documentRateLimitsFromEnv({}), {
+      windowMs: 15 * 60 * 1000,
+      uploadLimit: 10,
+      versionLimit: 20,
+      readLimit: 300,
+    })
+  })
+
+  it('reads limits from the environment and rejects invalid values', () => {
+    assert.deepEqual(
+      documentRateLimitsFromEnv({
+        RATE_LIMIT_WINDOW_MS: '60000',
+        RATE_LIMIT_UPLOAD_MAX: '5',
+        RATE_LIMIT_VERSION_MAX: '7',
+        RATE_LIMIT_READ_MAX: '900',
+      }),
+      { windowMs: 60_000, uploadLimit: 5, versionLimit: 7, readLimit: 900 },
+    )
+    for (const value of ['0', '-1', '1.5', 'ten']) {
+      assert.throws(() => documentRateLimitsFromEnv({ RATE_LIMIT_UPLOAD_MAX: value }), /RATE_LIMIT_UPLOAD_MAX/)
+    }
+  })
+
+  it('trusts one proxy hop only on Render unless TRUST_PROXY is set', () => {
+    assert.equal(trustProxySetting({}), false)
+    assert.equal(trustProxySetting({ RENDER: 'true' }), 1)
+    assert.equal(trustProxySetting({ RENDER: 'true', TRUST_PROXY: '0' }), false)
+    assert.equal(trustProxySetting({ TRUST_PROXY: '2' }), 2)
+    for (const value of ['true', '*', 'loopback', '-1']) {
+      assert.throws(() => trustProxySetting({ TRUST_PROXY: value }), /TRUST_PROXY/)
+    }
+  })
+})
+
+function limits(overrides: Partial<DocumentRateLimits>): DocumentRateLimits {
+  return { windowMs: 60_000, uploadLimit: 100, versionLimit: 100, readLimit: 100, ...overrides }
+}
+
+function appFor(db: DocumentsDb, overrides: Partial<CreateAppOptions> = {}): Express {
   return createApp({
     db,
     pdfStorage: createMemoryPdfStorage(),
@@ -213,6 +408,7 @@ function appFor(db: DocumentsDb): Express {
       }
       return Promise.resolve(null)
     },
+    ...overrides,
   })
 }
 
