@@ -835,6 +835,44 @@ p {
   gap: var(--space-2);
 }
 
+.dashboard__row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.dashboard__row .dashboard__item {
+  flex: 1;
+  min-width: 0;
+}
+
+.dashboard__delete {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.dashboard__delete:hover:not(:disabled) {
+  border-color: var(--destructive);
+  background: var(--destructive-bg);
+  color: var(--destructive);
+}
+
+.dashboard__delete:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.dashboard__delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .dashboard__item {
   display: flex;
   align-items: center;

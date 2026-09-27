@@ -107,6 +107,33 @@ export async function getDocumentVersionFile(
   return new Uint8Array(await response.arrayBuffer())
 }
 
+/** Permanently deletes a document and every saved version. A 404 means it is already gone. */
+export async function deleteDocument(documentId: string): Promise<void> {
+  let response: Response
+  try {
+    response = await authorizedFetch(`${DOCUMENTS_URL}/${encodeURIComponent(documentId)}`, {
+      method: 'DELETE',
+    })
+  } catch (error) {
+    if (error instanceof SessionExpiredError) {
+      throw error
+    }
+    throw new Error('The server is unavailable.', { cause: error })
+  }
+
+  if (response.status === 401) {
+    throw new SessionExpiredError()
+  }
+
+  if (response.status === 429) {
+    throw new Error('Too many requests. Wait a moment and try again.')
+  }
+
+  if (!response.ok && response.status !== 404) {
+    throw new Error('The document could not be deleted. Try again.')
+  }
+}
+
 function isDocumentVersionRecord(value: unknown): value is DocumentVersionRecord {
   return (
     typeof value === 'object' &&

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  deleteDocument,
   listDocuments,
   type DocumentListItem,
 } from '../api/documents.ts'
@@ -49,7 +50,35 @@ export function DocumentsDashboard({
     }
   }, [refreshKey])
 
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+
+  async function handleDelete(document: DocumentListItem) {
+    const confirmed = window.confirm(
+      `Delete "${document.name}" and all of its saved versions? This cannot be undone.`,
+    )
+    if (!confirmed) {
+      return
+    }
+
+    setDeletingId(document.id)
+    setDeleteError(null)
+    try {
+      await deleteDocument(document.id)
+      setDocuments((current) => current?.filter((item) => item.id !== document.id) ?? current)
+    } catch (cause) {
+      if (cause instanceof SessionExpiredError) {
+        setDeleteError('Your session expired. Sign in again to delete documents.')
+        return
+      }
+      setDeleteError(cause instanceof Error ? cause.message : 'The document could not be deleted.')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   const loading = documents === null && error === null
+  const busy = openingId !== null || deletingId !== null
 
   return (
     <div className="dashboard">
@@ -71,6 +100,12 @@ export function DocumentsDashboard({
           </p>
         ) : null}
 
+        {deleteError ? (
+          <p className="banner" role="alert">
+            {deleteError}
+          </p>
+        ) : null}
+
         {loading ? <p className="dashboard__status">Loading documents…</p> : null}
 
         {!loading && documents && documents.length === 0 && !error ? (
@@ -85,21 +120,38 @@ export function DocumentsDashboard({
         {documents && documents.length > 0 ? (
           <ul className="dashboard__list">
             {documents.map((document) => {
-              const busy = openingId === document.id
+              const opening = openingId === document.id
+              const deleting = deletingId === document.id
               return (
-                <li key={document.id}>
+                <li key={document.id} className="dashboard__row">
                   <button
                     type="button"
                     className="dashboard__item"
-                    disabled={openingId !== null}
+                    disabled={busy}
                     onClick={() => onOpenDocument(document)}
                   >
                     <span className="dashboard__name" title={document.name}>
                       {document.name}
                     </span>
                     <span className="dashboard__meta">
-                      {busy ? 'Opening…' : formatUpdated(document.updatedAt)}
+                      {opening
+                        ? 'Opening…'
+                        : deleting
+                          ? 'Deleting…'
+                          : formatUpdated(document.updatedAt)}
                     </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dashboard__delete"
+                    title="Delete document"
+                    aria-label={`Delete ${document.name}`}
+                    disabled={busy}
+                    onClick={() => {
+                      void handleDelete(document)
+                    }}
+                  >
+                    <Icon name="trash" />
                   </button>
                 </li>
               )
