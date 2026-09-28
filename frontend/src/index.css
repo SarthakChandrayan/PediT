@@ -739,6 +739,80 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Signature dialog --- */
+
+.signature-dialog {
+  width: min(560px, calc(100vw - var(--space-8)));
+  max-width: none;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  box-shadow: 0 12px 32px rgba(20, 24, 32, 0.18);
+}
+
+.signature-dialog::backdrop {
+  background: rgba(20, 24, 32, 0.32);
+}
+
+.signature-dialog__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  user-select: none;
+}
+
+.signature-dialog__title {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: var(--line-tight);
+}
+
+.signature-dialog__hint {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.signature-dialog__pad {
+  position: relative;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.signature-dialog__pad::after {
+  content: '';
+  position: absolute;
+  left: var(--space-6);
+  right: var(--space-6);
+  bottom: 44px;
+  border-bottom: 1px dashed var(--border-strong);
+  pointer-events: none;
+}
+
+.signature-dialog__canvas {
+  position: relative;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: clamp(120px, 40vh, 200px);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.signature-dialog__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.signature-dialog__cancel {
+  margin-left: auto;
+}
+
 /* --- Versions --- */
 
 .versions {

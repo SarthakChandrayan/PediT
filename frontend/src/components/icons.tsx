@@ -10,6 +10,7 @@ type IconName =
   | 'rectangle'
   | 'ellipse'
   | 'image'
+  | 'signature'
   | 'undo'
   | 'redo'
   | 'zoomIn'
@@ -53,6 +54,8 @@ const PATHS: Record<IconName, string> = {
   ellipse: 'M8 3.5a5.5 4.5 0 1 1 0 9a5.5 4.5 0 1 1 0-9',
   image:
     'M3.5 4.5h9v8h-9zM3.5 10.2 6.2 8l2.1 2 1.4-1.2 2.8 2.4M6.2 6.4h.01',
+  signature:
+    'M12 2.5 13.5 4 9.5 8H8V6.5zM2.5 11c1-2 2.2-2.6 2.6-1.6s-.6 2.4.4 2.4 1.4-1.8 2.4-1.8.9 1.2 1.8 1.2M2.5 13.5h11',
   undo: 'M6 6.5H3.5V4M3.7 6.5A5 5 0 1 1 3.5 9',
   redo: 'M10 6.5h2.5V4M12.3 6.5A5 5 0 1 0 12.5 9',
   zoomIn: 'M7 3.5a4.5 4.5 0 1 1 0 9a4.5 4.5 0 0 1 0-9ZM13.5 13.5 10.4 10.4M7 5.8v4.4M4.8 8h4.4',

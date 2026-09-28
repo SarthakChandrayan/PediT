@@ -60,6 +60,7 @@ type ToolbarProps = {
     patch: Partial<Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'>>,
   ) => void
   onInsertImage: () => void
+  onSignature: () => void
 }
 
 export function Toolbar({
@@ -104,6 +105,7 @@ export function Toolbar({
   selectedDrawing,
   onNewTextStyle,
   onInsertImage,
+  onSignature,
 }: ToolbarProps) {
   const zoomPercent = Math.round(scale * 100)
   const hasDocument = pageCount > 0
@@ -223,6 +225,13 @@ export function Toolbar({
             icon="image"
             disabled={pageOpsDisabled}
             onClick={onInsertImage}
+          />
+          <ToolButton
+            label="Signature"
+            icon="signature"
+            hasPopup="dialog"
+            disabled={pageOpsDisabled}
+            onClick={onSignature}
           />
         </div>
         <div className="tool-divider" aria-hidden="true" />
@@ -346,6 +355,7 @@ function ToolButton({
   danger,
   labeled,
   shortcut,
+  hasPopup,
   onClick,
   onMouseDown,
 }: {
@@ -356,6 +366,7 @@ function ToolButton({
   danger?: boolean
   labeled?: boolean
   shortcut?: string
+  hasPopup?: 'dialog'
   onClick?: () => void
   onMouseDown?: (event: MouseEvent<HTMLButtonElement>) => void
 }) {
@@ -368,6 +379,7 @@ function ToolButton({
       aria-label={label}
       aria-pressed={pressed}
       aria-keyshortcuts={shortcut}
+      aria-haspopup={hasPopup}
       data-tooltip={label}
       disabled={disabled}
       onClick={onClick}

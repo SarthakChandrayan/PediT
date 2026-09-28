@@ -12,8 +12,11 @@ import { AuthScreen } from './auth/AuthScreen.tsx'
 import { Banner, BANNER_AUTO_DISMISS_MS } from './components/Banner.tsx'
 import { DocumentsDashboard } from './components/DocumentsDashboard.tsx'
 import { EditorHeader } from './components/EditorHeader.tsx'
+import { SignatureDialog } from './components/SignatureDialog.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
 import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
+import { useSignature } from './pdf/SignatureContext.tsx'
+import { SignatureProvider } from './pdf/SignatureProvider.tsx'
 import { isFindShortcut, shouldCloseSearchOnEscape } from './pdf/search.ts'
 import { VersionHistory } from './components/VersionHistory.tsx'
 import { DocumentHistoryProvider } from './pdf/DocumentHistoryProvider.tsx'
@@ -67,12 +70,14 @@ function AuthenticatedApp() {
 
   return (
     <DocumentHistoryProvider>
-      <Editor
-        userEmail={auth.email}
-        onLogout={() => {
-          void auth.signOut()
-        }}
-      />
+      <SignatureProvider>
+        <Editor
+          userEmail={auth.email}
+          onLogout={() => {
+            void auth.signOut()
+          }}
+        />
+      </SignatureProvider>
     </DocumentHistoryProvider>
   )
 }
@@ -98,6 +103,7 @@ function Editor({
   onLogout: () => void
 }) {
   const history = useDocumentHistory()
+  const signatures = useSignature()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const viewerRef = useRef<PdfViewerHandle>(null)
@@ -855,7 +861,11 @@ function Editor({
         onInsertImage={() => {
           imageInputRef.current?.click()
         }}
+        onSignature={signatures.openDialog}
       />
+      {signatures.dialogOpen ? (
+        <SignatureDialog onCancel={signatures.cancelDialog} onConfirm={signatures.confirm} />
+      ) : null}
     </div>
     </SearchProvider>
   )
