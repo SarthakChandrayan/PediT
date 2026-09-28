@@ -555,10 +555,12 @@ function snapshotOf(pdfBytes: Uint8Array): DocumentSnapshot {
     drawings: [],
     images: [],
     texts: [],
+    signatures: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
     selectedTextId: null,
+    selectedSignatureId: null,
   }
 }
 

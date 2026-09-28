@@ -56,11 +56,16 @@ type ToolbarProps = {
   selectedNewText: Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'> | null
   selectedImage: { width: number; height: number } | null
   selectedDrawing: boolean
+  hasSignature: boolean
+  signatureTool: boolean
+  signaturePreview: string | null
+  selectedSignature: { width: number; height: number } | null
   onNewTextStyle: (
     patch: Partial<Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'>>,
   ) => void
   onInsertImage: () => void
   onSignature: () => void
+  onNewSignature: () => void
 }
 
 export function Toolbar({
@@ -103,15 +108,24 @@ export function Toolbar({
   selectedNewText,
   selectedImage,
   selectedDrawing,
+  hasSignature,
+  signatureTool,
+  signaturePreview,
+  selectedSignature,
   onNewTextStyle,
   onInsertImage,
   onSignature,
+  onNewSignature,
 }: ToolbarProps) {
   const zoomPercent = Math.round(scale * 100)
   const hasDocument = pageCount > 0
-  const selectActive = !drawingTool && !textTool
+  const selectActive = !drawingTool && !textTool && !signatureTool
   const showMarkupRemove =
-    canRemoveHighlight && !selectedNewText && !selectedImage && !selectedDrawing
+    canRemoveHighlight &&
+    !selectedNewText &&
+    !selectedImage &&
+    !selectedDrawing &&
+    !selectedSignature
 
   return (
     <div className="editor-toolbar" role="toolbar" aria-label="Editor tools">
@@ -227,9 +241,10 @@ export function Toolbar({
             onClick={onInsertImage}
           />
           <ToolButton
-            label="Signature"
+            label={hasSignature ? 'Place signature' : 'Signature'}
             icon="signature"
-            hasPopup="dialog"
+            pressed={hasSignature ? signatureTool : undefined}
+            hasPopup={hasSignature ? undefined : 'dialog'}
             disabled={pageOpsDisabled}
             onClick={onSignature}
           />
@@ -283,6 +298,23 @@ export function Toolbar({
         {selectedDrawing ? (
           <div className="context-bar" aria-label="Drawing">
             <ToolButton label="Delete drawing" icon="trash" danger onClick={onRemoveHighlight} />
+          </div>
+        ) : null}
+        {signatureTool ? (
+          <div className="context-bar" aria-label="Signature placement">
+            {signaturePreview ? (
+              <img className="context-bar__signature" src={signaturePreview} alt="Current signature" />
+            ) : null}
+            <span className="context-bar__metric">Click a page to place</span>
+            <ToolButton label="New signature" icon="pen" labeled hasPopup="dialog" onClick={onNewSignature} />
+          </div>
+        ) : null}
+        {selectedSignature && !signatureTool ? (
+          <div className="context-bar" aria-label="Signature">
+            <span className="context-bar__metric">
+              {Math.round(selectedSignature.width)} × {Math.round(selectedSignature.height)}
+            </span>
+            <ToolButton label="Delete signature" icon="trash" danger onClick={onRemoveHighlight} />
           </div>
         ) : null}
         <div className="tool-divider" aria-hidden="true" />

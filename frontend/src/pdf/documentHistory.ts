@@ -2,6 +2,7 @@ import type { DrawingAnnotation } from './drawings.ts'
 import type { TextMarkup } from './highlights.ts'
 import type { ImageAnnotation } from './images.ts'
 import { cloneNewText, type NewTextAnnotation } from './newTexts.ts'
+import type { SignatureAnnotation } from './placedSignatures.ts'
 import type { TextEdit } from './textEdits.ts'
 
 /**
@@ -18,10 +19,12 @@ export type DocumentSnapshot = {
   drawings: readonly DrawingAnnotation[]
   images: readonly ImageAnnotation[]
   texts: readonly NewTextAnnotation[]
+  signatures: readonly SignatureAnnotation[]
   selectedMarkupId: string | null
   selectedDrawingId: string | null
   selectedImageId: string | null
   selectedTextId: string | null
+  selectedSignatureId: string | null
 }
 
 export type HistoryEntry = {
@@ -34,6 +37,7 @@ export type SelectionPatch = {
   selectedDrawingId?: string | null
   selectedImageId?: string | null
   selectedTextId?: string | null
+  selectedSignatureId?: string | null
 }
 
 export type CommitOptions = {
@@ -69,10 +73,12 @@ export function emptyDocumentSnapshot(): DocumentSnapshot {
     drawings: [],
     images: [],
     texts: [],
+    signatures: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
     selectedTextId: null,
+    selectedSignatureId: null,
   }
 }
 
@@ -105,10 +111,12 @@ export function withPageOperation(pdfBytes: Uint8Array): DocumentSnapshot {
     drawings: [],
     images: [],
     texts: [],
+    signatures: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
     selectedTextId: null,
+    selectedSignatureId: null,
   }
 }
 
@@ -334,10 +342,12 @@ function cloneSnapshot(snapshot: DocumentSnapshot, copyPdf: boolean): DocumentSn
     drawings: snapshot.drawings.map(cloneDrawing),
     images: snapshot.images.map(cloneImage),
     texts: (snapshot.texts ?? []).map(cloneNewText),
+    signatures: (snapshot.signatures ?? []).map((signature) => ({ ...signature })),
     selectedMarkupId: snapshot.selectedMarkupId,
     selectedDrawingId: snapshot.selectedDrawingId,
     selectedImageId: snapshot.selectedImageId,
     selectedTextId: snapshot.selectedTextId ?? null,
+    selectedSignatureId: snapshot.selectedSignatureId ?? null,
   }
 }
 
@@ -385,6 +395,10 @@ function applySelection(snapshot: DocumentSnapshot, patch: SelectionPatch): Docu
       patch.selectedImageId !== undefined ? patch.selectedImageId : snapshot.selectedImageId,
     selectedTextId:
       patch.selectedTextId !== undefined ? patch.selectedTextId : snapshot.selectedTextId,
+    selectedSignatureId:
+      patch.selectedSignatureId !== undefined
+        ? patch.selectedSignatureId
+        : snapshot.selectedSignatureId,
   }
 }
 
@@ -395,7 +409,9 @@ function selectionChanges(snapshot: DocumentSnapshot, patch: SelectionPatch): bo
     (patch.selectedDrawingId !== undefined &&
       patch.selectedDrawingId !== snapshot.selectedDrawingId) ||
     (patch.selectedImageId !== undefined && patch.selectedImageId !== snapshot.selectedImageId) ||
-    (patch.selectedTextId !== undefined && patch.selectedTextId !== snapshot.selectedTextId)
+    (patch.selectedTextId !== undefined && patch.selectedTextId !== snapshot.selectedTextId) ||
+    (patch.selectedSignatureId !== undefined &&
+      patch.selectedSignatureId !== snapshot.selectedSignatureId)
   )
 }
 
@@ -411,7 +427,8 @@ function sameSelection(left: DocumentSnapshot, right: DocumentSnapshot): boolean
     left.selectedMarkupId === right.selectedMarkupId &&
     left.selectedDrawingId === right.selectedDrawingId &&
     left.selectedImageId === right.selectedImageId &&
-    left.selectedTextId === right.selectedTextId
+    left.selectedTextId === right.selectedTextId &&
+    left.selectedSignatureId === right.selectedSignatureId
   )
 }
 
@@ -421,8 +438,39 @@ function sameContent(left: DocumentSnapshot, right: DocumentSnapshot): boolean {
     sameMarkups(left.markups, right.markups) &&
     sameDrawings(left.drawings, right.drawings) &&
     sameImages(left.images, right.images) &&
-    sameTexts(left.texts, right.texts)
+    sameTexts(left.texts, right.texts) &&
+    sameSignatures(left.signatures ?? [], right.signatures ?? [])
   )
+}
+
+function sameSignatures(
+  left: readonly SignatureAnnotation[],
+  right: readonly SignatureAnnotation[],
+): boolean {
+  if (left.length !== right.length) {
+    return false
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index]
+    const b = right[index]
+    if (!a || !b) {
+      return false
+    }
+    if (
+      a.id !== b.id ||
+      a.pageNumber !== b.pageNumber ||
+      a.pdfX !== b.pdfX ||
+      a.pdfY !== b.pdfY ||
+      a.width !== b.width ||
+      a.height !== b.height ||
+      a.originalWidth !== b.originalWidth ||
+      a.originalHeight !== b.originalHeight ||
+      a.dataUrl !== b.dataUrl
+    ) {
+      return false
+    }
+  }
+  return true
 }
 
 function sameEdits(left: readonly TextEdit[], right: readonly TextEdit[]): boolean {

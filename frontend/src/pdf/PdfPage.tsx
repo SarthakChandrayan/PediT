@@ -12,6 +12,7 @@ import { ImageLayer } from './ImageLayer.tsx'
 import { HighlightLayer } from './HighlightLayer.tsx'
 import { NewTextLayer } from './NewTextLayer.tsx'
 import { SearchHighlightLayer } from './SearchHighlightLayer.tsx'
+import { SignatureLayer } from './SignatureLayer.tsx'
 import { TextLayer } from './TextLayer.tsx'
 
 type PdfPageProps = {
@@ -160,6 +161,7 @@ export function PdfPage({
             <SearchHighlightLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <DrawingLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <ImageLayer pageNumber={pageNumber} viewport={frame.viewport} />
+            <SignatureLayer pageNumber={pageNumber} viewport={frame.viewport} />
             <TextLayer
               pdf={pdf}
               pageNumber={pageNumber}

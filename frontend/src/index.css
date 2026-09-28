@@ -655,6 +655,13 @@ p {
   font-variant-numeric: tabular-nums;
 }
 
+.context-bar__signature {
+  display: block;
+  max-width: 64px;
+  max-height: 20px;
+  object-fit: contain;
+}
+
 .field-select,
 .field-color,
 .page-jump__input,
@@ -1413,6 +1420,65 @@ p {
   bottom: -4px;
   left: -4px;
   cursor: nesw-resize;
+}
+
+.signature-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.signature-layer--placing {
+  z-index: 6;
+}
+
+.signature-capture {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  cursor: copy;
+  touch-action: none;
+}
+
+.signature-annotation {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.signature-layer--placing .signature-annotation {
+  pointer-events: none;
+}
+
+.signature-annotation img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+.signature-annotation[data-selected='true'] {
+  outline: 1px dashed var(--accent);
+  outline-offset: 1px;
+}
+
+.signature-handle {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  background: #fff;
+  box-sizing: border-box;
+  cursor: nwse-resize;
 }
 
 .new-text-layer {

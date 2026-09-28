@@ -48,6 +48,7 @@ import {
   type AnnotationUiState,
   type PdfViewerHandle,
 } from './pdf/PdfViewer.tsx'
+import { signaturesAsImages } from './pdf/placedSignatures.ts'
 import { DEFAULT_PDF_SCALE, stepPdfScale } from './pdf/scale.ts'
 import { documentSaveState } from './ui/saveState.ts'
 
@@ -146,6 +147,8 @@ function Editor({
     selectedNewText: null,
     selectedImage: null,
     selectedDrawing: false,
+    signatureTool: false,
+    selectedSignature: null,
     hasUncommittedEdit: false,
   })
   const historyDirtyRef = useRef(history.isDirty)
@@ -514,6 +517,8 @@ function Editor({
       selectedNewText: null,
       selectedImage: null,
       selectedDrawing: false,
+      signatureTool: false,
+      selectedSignature: null,
       hasUncommittedEdit: false,
     })
     setDashboardRefreshKey((current) => current + 1)
@@ -570,7 +575,10 @@ function Editor({
     setPageOpPending(true)
     setOpenError(null)
     try {
-      const base = await exportSnapshot(snapshot)
+      const base = await exportSnapshot({
+        ...snapshot,
+        images: [...snapshot.images, ...signaturesAsImages(snapshot.signatures)],
+      })
       if (openGeneration.current !== generation || history.getEpoch() !== epoch) {
         return
       }
@@ -851,20 +859,45 @@ function Editor({
           if (annotationUi.textTool) {
             viewerRef.current?.setTextTool(false)
           }
+          if (annotationUi.signatureTool) {
+            viewerRef.current?.stopSignaturePlacement()
+          }
         }}
         selectedNewText={annotationUi.selectedNewText}
         selectedImage={annotationUi.selectedImage}
         selectedDrawing={annotationUi.selectedDrawing}
+        hasSignature={signatures.signature !== null}
         onNewTextStyle={(patch) => {
           viewerRef.current?.patchSelectedNewText(patch)
         }}
         onInsertImage={() => {
           imageInputRef.current?.click()
         }}
-        onSignature={signatures.openDialog}
+        signatureTool={annotationUi.signatureTool}
+        signaturePreview={signatures.signature?.dataUrl ?? null}
+        selectedSignature={annotationUi.selectedSignature}
+        onSignature={() => {
+          const signature = signatures.signature
+          if (!signature) {
+            signatures.openDialog()
+            return
+          }
+          if (annotationUi.signatureTool) {
+            viewerRef.current?.stopSignaturePlacement()
+            return
+          }
+          viewerRef.current?.startSignaturePlacement(signature)
+        }}
+        onNewSignature={signatures.openDialog}
       />
       {signatures.dialogOpen ? (
-        <SignatureDialog onCancel={signatures.cancelDialog} onConfirm={signatures.confirm} />
+        <SignatureDialog
+          onCancel={signatures.cancelDialog}
+          onConfirm={(signature) => {
+            signatures.confirm(signature)
+            viewerRef.current?.startSignaturePlacement(signature)
+          }}
+        />
       ) : null}
     </div>
     </SearchProvider>
@@ -916,10 +949,12 @@ function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {
     drawings: [],
     images: [],
     texts: [],
+    signatures: [],
     selectedMarkupId: null,
     selectedDrawingId: null,
     selectedImageId: null,
     selectedTextId: null,
+    selectedSignatureId: null,
   }
 }
 

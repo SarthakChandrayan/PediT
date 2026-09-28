@@ -18,6 +18,17 @@ import { useDocumentHistory } from './DocumentHistoryContext.tsx'
 import { DrawingContext, type DrawingApi } from './DrawingContext.tsx'
 import { ImageContext, type ImageApi } from './ImageContext.tsx'
 import { NewTextContext, type NewTextApi } from './NewTextContext.tsx'
+import { PlacedSignatureContext, type PlacedSignatureApi } from './PlacedSignatureContext.tsx'
+import {
+  placeSignature,
+  withoutSignature,
+  withPlacedSignature,
+  withSignatureBox,
+  type PageSize,
+  type SignatureAnnotation,
+  type SignatureBox,
+} from './placedSignatures.ts'
+import type { Signature } from './signatures.ts'
 import {
   appendDrawingPoint,
   finalizeDrawing,
@@ -75,6 +86,7 @@ export type {
   DrawingKind,
   ImageAnnotation,
   NewTextAnnotation,
+  SignatureAnnotation,
   TextEdit,
   TextHighlight,
   TextMarkup,
@@ -96,6 +108,9 @@ export type AnnotationUiState = {
   selectedNewText: NewTextStyleState | null
   selectedImage: { width: number; height: number } | null
   selectedDrawing: boolean
+  /** True while clicking a page places the reusable signature. */
+  signatureTool: boolean
+  selectedSignature: { width: number; height: number } | null
   hasUncommittedEdit: boolean
 }
 
@@ -163,6 +178,15 @@ export type PdfViewerHandle = {
       height: number
     },
   ) => void
+  /**
+   * Turns signature placement on for this signature. The next page click
+   * places a copy of it. Does not change the PDF or history.
+   */
+  startSignaturePlacement: (signature: Signature) => void
+  /** Turns signature placement off. Does not change the PDF or history. */
+  stopSignaturePlacement: () => void
+  /** Placed signatures in PDF user space. The PDF bytes are unchanged. */
+  getSignatures: () => readonly SignatureAnnotation[]
 }
 
 type PdfViewerProps = {
@@ -209,6 +233,7 @@ export function PdfViewer({
   const [drawingTool, setDrawingToolState] = useState<DrawingKind | null>(null)
   const [draft, setDraft] = useState<DrawingDraft | null>(null)
   const [textTool, setTextToolState] = useState(false)
+  const [signatureTool, setSignatureToolState] = useState<Signature | null>(null)
   const [textDraft, setTextDraft] = useState<NewTextAnnotation | null>(null)
   const [newTextEdit, setNewTextEdit] = useState<{
     id: string
@@ -221,6 +246,7 @@ export function PdfViewer({
   const textDraftRef = useRef(textDraft)
   const newTextEditRef = useRef(newTextEdit)
   const textToolRef = useRef(textTool)
+  const signatureToolRef = useRef(signatureTool)
   const pageCountRef = useRef(0)
   const runsRef = useRef(new Map<string, HighlightRunRecord>())
   const capturedSelectionRef = useRef<SelectedTextPiece[] | null>(null)
@@ -247,6 +273,9 @@ export function PdfViewer({
     if (pdfChanged && textTool) {
       setTextToolState(false)
     }
+    if (pdfChanged && signatureTool !== null) {
+      setSignatureToolState(null)
+    }
     if ((pdfChanged || historyRestored) && textDraft !== null) {
       setTextDraft(null)
     }
@@ -261,6 +290,7 @@ export function PdfViewer({
   const shownDraft = pdfChanged || historyRestored ? null : draft
   const shownTool = pdfChanged ? null : drawingTool
   const shownTextTool = pdfChanged ? false : textTool
+  const shownSignatureTool = pdfChanged ? null : signatureTool
   const shownTextDraft = pdfChanged || historyRestored ? null : textDraft
   const shownNewTextEdit = pdfChanged || historyRestored ? null : newTextEdit
 
@@ -272,6 +302,8 @@ export function PdfViewer({
   const selectedImageId = view.selectedImageId
   const createdTexts = view.texts
   const selectedTextId = view.selectedTextId
+  const placedSignatures = view.signatures
+  const selectedSignatureId = view.selectedSignatureId
 
   useEffect(() => {
     historyRef.current = history
@@ -297,6 +329,10 @@ export function PdfViewer({
   useEffect(() => {
     textToolRef.current = textTool
   }, [textTool])
+
+  useEffect(() => {
+    signatureToolRef.current = signatureTool
+  }, [signatureTool])
 
   useEffect(() => {
     focusPageRef.current = focusPage
@@ -362,12 +398,15 @@ export function PdfViewer({
       null
     const selectedImage =
       insertedImages.find((item) => item.id === selectedImageId) ?? null
+    const selectedSignature =
+      placedSignatures.find((item) => item.id === selectedSignatureId) ?? null
     onAnnotationStateChangeRef.current?.({
       canHighlight,
       canRemoveHighlight:
         selectedHighlightId !== null ||
         selectedDrawingId !== null ||
         selectedImageId !== null ||
+        selectedSignature !== null ||
         selectedCreated !== null,
       drawingTool: shownTool,
       textTool: shownTextTool,
@@ -384,6 +423,10 @@ export function PdfViewer({
         ? { width: selectedImage.width, height: selectedImage.height }
         : null,
       selectedDrawing: selectedDrawingId !== null,
+      signatureTool: shownSignatureTool !== null,
+      selectedSignature: selectedSignature
+        ? { width: selectedSignature.width, height: selectedSignature.height }
+        : null,
       hasUncommittedEdit:
         (shownActive !== null && shownActive.draft !== shownActive.originalText) ||
         (shownTextDraft !== null && shownTextDraft.text.trim().length > 0) ||
@@ -393,12 +436,15 @@ export function PdfViewer({
     canHighlight,
     createdTexts,
     insertedImages,
+    placedSignatures,
     selectedDrawingId,
     selectedHighlightId,
     selectedImageId,
+    selectedSignatureId,
     selectedTextId,
     shownActive,
     shownNewTextEdit,
+    shownSignatureTool,
     shownTextDraft,
     shownTextTool,
     shownTool,
@@ -534,29 +580,101 @@ export function PdfViewer({
   const selectHighlight = useCallback((id: string | null) => {
     historyRef.current.select({
       selectedMarkupId: id,
-      ...(id ? { selectedDrawingId: null, selectedImageId: null, selectedTextId: null } : {}),
+      ...(id
+        ? {
+            selectedDrawingId: null,
+            selectedImageId: null,
+            selectedTextId: null,
+            selectedSignatureId: null,
+          }
+        : {}),
     })
   }, [])
 
   const selectDrawing = useCallback((id: string | null) => {
     historyRef.current.select({
       selectedDrawingId: id,
-      ...(id ? { selectedMarkupId: null, selectedImageId: null, selectedTextId: null } : {}),
+      ...(id
+        ? {
+            selectedMarkupId: null,
+            selectedImageId: null,
+            selectedTextId: null,
+            selectedSignatureId: null,
+          }
+        : {}),
     })
   }, [])
 
   const selectImage = useCallback((id: string | null) => {
     historyRef.current.select({
       selectedImageId: id,
-      ...(id ? { selectedMarkupId: null, selectedDrawingId: null, selectedTextId: null } : {}),
+      ...(id
+        ? {
+            selectedMarkupId: null,
+            selectedDrawingId: null,
+            selectedTextId: null,
+            selectedSignatureId: null,
+          }
+        : {}),
     })
   }, [])
 
   const selectText = useCallback((id: string | null) => {
     historyRef.current.select({
       selectedTextId: id,
-      ...(id ? { selectedMarkupId: null, selectedDrawingId: null, selectedImageId: null } : {}),
+      ...(id
+        ? {
+            selectedMarkupId: null,
+            selectedDrawingId: null,
+            selectedImageId: null,
+            selectedSignatureId: null,
+          }
+        : {}),
     })
+  }, [])
+
+  const selectSignature = useCallback((id: string | null) => {
+    historyRef.current.select({
+      selectedSignatureId: id,
+      ...(id
+        ? {
+            selectedMarkupId: null,
+            selectedDrawingId: null,
+            selectedImageId: null,
+            selectedTextId: null,
+          }
+        : {}),
+    })
+  }, [])
+
+  const placeSignatureAt = useCallback(
+    (pageNumber: number, center: PdfPoint, page: PageSize) => {
+      const signature = signatureToolRef.current
+      if (!signature) {
+        return
+      }
+      const created = placeSignature({ signature, pageNumber, center, page })
+      signatureToolRef.current = null
+      setSignatureToolState(null)
+      historyRef.current.commit((snapshot) => withPlacedSignature(snapshot, created))
+    },
+    [],
+  )
+
+  const updateSignature = useCallback((id: string, box: SignatureBox) => {
+    historyRef.current.updateGesture((snapshot) => withSignatureBox(snapshot, id, box))
+  }, [])
+
+  const beginSignatureGesture = useCallback(() => {
+    historyRef.current.beginGesture()
+  }, [])
+
+  const endSignatureGesture = useCallback(() => {
+    historyRef.current.endGesture()
+  }, [])
+
+  const cancelSignatureGesture = useCallback(() => {
+    historyRef.current.cancelGesture()
   }, [])
 
   const updateImage = useCallback((id: string, box: ImageBox) => {
@@ -596,6 +714,7 @@ export function PdfViewer({
       selectedMarkupId: null,
       selectedDrawingId: null,
       selectedImageId: null,
+      selectedSignatureId: null,
     }))
   }, [selectText])
 
@@ -711,7 +830,8 @@ export function PdfViewer({
     selectHighlight(null)
     selectDrawing(null)
     selectImage(null)
-  }, [selectDrawing, selectHighlight, selectImage])
+    selectSignature(null)
+  }, [selectDrawing, selectHighlight, selectImage, selectSignature])
 
   const extendStroke = useCallback((point: PdfPoint) => {
     const current = draftRef.current
@@ -786,6 +906,31 @@ export function PdfViewer({
       selectImage,
       selectedImageId,
       updateImage,
+    ],
+  )
+
+  const signatureApi = useMemo<PlacedSignatureApi>(
+    () => ({
+      signatures: placedSignatures,
+      selectedId: selectedSignatureId,
+      placing: shownSignatureTool,
+      selectSignature,
+      placeAt: placeSignatureAt,
+      updateSignature,
+      beginSignatureGesture,
+      endSignatureGesture,
+      cancelSignatureGesture,
+    }),
+    [
+      beginSignatureGesture,
+      cancelSignatureGesture,
+      endSignatureGesture,
+      placeSignatureAt,
+      placedSignatures,
+      selectSignature,
+      selectedSignatureId,
+      shownSignatureTool,
+      updateSignature,
     ],
   )
 
@@ -987,6 +1132,11 @@ export function PdfViewer({
           }))
           return
         }
+        const signatureId = viewNow.selectedSignatureId
+        if (signatureId) {
+          historyRef.current.commit((snapshot) => withoutSignature(snapshot, signatureId))
+          return
+        }
         const imageId = viewNow.selectedImageId
         if (imageId) {
           historyRef.current.commit((snapshot) => ({
@@ -1023,6 +1173,8 @@ export function PdfViewer({
         draftRef.current = null
         setDraft(null)
         setTextToolState(false)
+        signatureToolRef.current = null
+        setSignatureToolState(null)
         commitNewTextDraft()
         commitNewTextEdit()
       },
@@ -1034,6 +1186,8 @@ export function PdfViewer({
           return !current
         })
         setDrawingToolState(null)
+        signatureToolRef.current = null
+        setSignatureToolState(null)
         draftRef.current = null
         setDraft(null)
       },
@@ -1119,7 +1273,25 @@ export function PdfViewer({
           selectedMarkupId: null,
           selectedDrawingId: null,
           selectedTextId: null,
+          selectedSignatureId: null,
         }))
+      },
+      startSignaturePlacement(signature) {
+        signatureToolRef.current = signature
+        setSignatureToolState(signature)
+        setDrawingToolState(null)
+        setTextToolState(false)
+        draftRef.current = null
+        setDraft(null)
+        commitNewTextDraft()
+        commitNewTextEdit()
+      },
+      stopSignaturePlacement() {
+        signatureToolRef.current = null
+        setSignatureToolState(null)
+      },
+      getSignatures() {
+        return historyRef.current.getView().signatures
       },
     }
     },
@@ -1246,7 +1418,14 @@ export function PdfViewer({
       if (textDraftRef.current || newTextEditRef.current) {
         return
       }
-      const id = historyRef.current.getView().selectedTextId
+      const viewNow = historyRef.current.getView()
+      const signatureId = viewNow.selectedSignatureId
+      if (signatureId) {
+        event.preventDefault()
+        historyRef.current.commit((snapshot) => withoutSignature(snapshot, signatureId))
+        return
+      }
+      const id = viewNow.selectedTextId
       if (!id) {
         return
       }
@@ -1263,11 +1442,46 @@ export function PdfViewer({
     }
   }, [])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !signatureToolRef.current) {
+        return
+      }
+      signatureToolRef.current = null
+      setSignatureToolState(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [])
+
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!historyRef.current.getView().selectedSignatureId) {
+        return
+      }
+      const target = event.target
+      if (!(target instanceof Element) || !scrollerRef.current?.contains(target)) {
+        return
+      }
+      if (target.closest('[data-signature-id]')) {
+        return
+      }
+      selectSignature(null)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+    }
+  }, [selectSignature])
+
   return (
     <TextEditorContext.Provider value={editorApi}>
       <HighlightContext.Provider value={highlightApi}>
       <DrawingContext.Provider value={drawingApi}>
       <ImageContext.Provider value={imageApi}>
+      <PlacedSignatureContext.Provider value={signatureApi}>
       <NewTextContext.Provider value={newTextApi}>
       <div className="pdf-stage">
       {pdfDocument ? (
@@ -1316,6 +1530,7 @@ export function PdfViewer({
       </div>
       </div>
       </NewTextContext.Provider>
+      </PlacedSignatureContext.Provider>
       </ImageContext.Provider>
       </DrawingContext.Provider>
       </HighlightContext.Provider>
