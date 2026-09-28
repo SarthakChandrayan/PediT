@@ -11,7 +11,8 @@ import {
  * `dataUrl` is a PNG with a transparent background, cropped to the ink.
  * `width` and `height` are the cropped size in CSS pixels as drawn, so a
  * placement can keep the aspect ratio. The signature lives in frontend memory
- * only: it is not uploaded, saved, or written into the PDF.
+ * only and is not uploaded or saved on its own. Copies placed on pages become
+ * PDF content when the document is saved or exported.
  */
 export type Signature = {
   id: string

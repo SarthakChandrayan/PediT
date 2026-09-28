@@ -21,7 +21,7 @@ import {
   type DocumentHistory,
   type DocumentSnapshot,
 } from './documentHistory.ts'
-import { exportEditedPdf } from './exportPdf.ts'
+import { exportDocumentSnapshot } from './exportPdf.ts'
 import {
   dragSignature,
   MIN_SIGNATURE_LONG_SIDE,
@@ -32,7 +32,6 @@ import {
   pngDataUrlToBytes,
   signatureAspectRatio,
   signatureRect,
-  signaturesAsImages,
   startSignatureGesture,
   withoutSignature,
   withPlacedSignature,
@@ -416,7 +415,7 @@ describe('signature history and dirty state', () => {
     expect(isHistoryDirty(history)).toBe(true)
   })
 
-  it('bakes signatures through the image path on a page operation, and undo restores them', async () => {
+  it('bakes signatures into the PDF on a page operation, and undo restores them', async () => {
     const doc = await PDFDocument.create()
     doc.addPage([PAGE.width, PAGE.height])
     let history = createDocumentHistory({ ...emptyDocumentSnapshot(), pdfBytes: await doc.save() })
@@ -424,23 +423,7 @@ describe('signature history and dirty state', () => {
     history = commitDocument(history, (snapshot) => withPlacedSignature(snapshot, placed))
 
     const snapshot = history.present.snapshot
-    const [image] = signaturesAsImages(snapshot.signatures)
-    expect(image).toMatchObject({
-      pageNumber: 1,
-      x: placed.pdfX,
-      y: placed.pdfY,
-      width: placed.width,
-      height: placed.height,
-      format: 'png',
-    })
-    const baked = await exportEditedPdf(
-      copyBuffer(snapshot.pdfBytes),
-      [],
-      [],
-      [],
-      signaturesAsImages(snapshot.signatures),
-      [],
-    )
+    const baked = await exportDocumentSnapshot(snapshot)
     expect(pdfHasImage(baked)).toBe(true)
     expect(pdfHasImage(snapshot.pdfBytes)).toBe(false)
 
@@ -507,12 +490,6 @@ function expectInsidePage(item: SignatureBox) {
   expect(item.pdfY).toBeGreaterThanOrEqual(-1e-9)
   expect(item.pdfX + item.width).toBeLessThanOrEqual(PAGE.width + 1e-9)
   expect(item.pdfY + item.height).toBeLessThanOrEqual(PAGE.height + 1e-9)
-}
-
-function copyBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new ArrayBuffer(bytes.byteLength)
-  new Uint8Array(copy).set(bytes)
-  return copy
 }
 
 function pdfHasImage(bytes: Uint8Array): boolean {

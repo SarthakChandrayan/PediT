@@ -1,6 +1,7 @@
 import {
   PDFDocument,
   type PDFFont,
+  type PDFImage,
   type PDFPage,
   StandardFonts,
   LineCapStyle,
@@ -21,11 +22,13 @@ import {
   TextRenderingMode,
 } from 'pdf-lib'
 import type { PdfPoint, PdfRect } from './coordinates.ts'
+import { clonePdfBytes, type DocumentSnapshot } from './documentHistory.ts'
 import { arrowGeometry, boundsFromPoints, type DrawingAnnotation } from './drawings.ts'
 import { intersectPdfRects, paintRectsFor, type TextMarkup } from './highlights.ts'
 import type { ImageAnnotation } from './images.ts'
 import { resolveNewTextFont, type NewTextAnnotation } from './newTexts.ts'
 import { embedOriginalFont } from './originalFont.ts'
+import { pngDataUrlToBytes, type SignatureAnnotation } from './placedSignatures.ts'
 import { horizontalFitFactor, resolveStandardFont } from './textAppearance.ts'
 import type { TextEdit } from './textEdits.ts'
 
@@ -43,6 +46,38 @@ const GLYPH_DESCENT = -0.25
 type TextMatrix = [number, number, number, number, number, number]
 
 /**
+ * The PDF for a document snapshot: its working bytes with every overlay in the
+ * snapshot painted in. Save, Export, and page operations all use this, and none
+ * of them write the result back as the working bytes with the overlays still
+ * listed, so each overlay is painted into a given output exactly once.
+ */
+export async function exportDocumentSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
+  const signatures = snapshot.signatures ?? []
+  const texts = snapshot.texts ?? []
+  if (
+    snapshot.edits.length === 0 &&
+    snapshot.markups.length === 0 &&
+    snapshot.drawings.length === 0 &&
+    snapshot.images.length === 0 &&
+    texts.length === 0 &&
+    signatures.length === 0
+  ) {
+    return clonePdfBytes(snapshot.pdfBytes)
+  }
+  const copy = new ArrayBuffer(snapshot.pdfBytes.byteLength)
+  new Uint8Array(copy).set(snapshot.pdfBytes)
+  return exportEditedPdf(
+    copy,
+    snapshot.edits,
+    snapshot.markups,
+    snapshot.drawings,
+    snapshot.images,
+    texts,
+    signatures,
+  )
+}
+
+/**
  * Builds a new PDF from the original bytes, text edits, and text annotations.
  * The input buffer is not modified. With neither edits nor annotations, the
  * result is a copy of those bytes.
@@ -53,7 +88,8 @@ type TextMatrix = [number, number, number, number, number, number]
  * paints the annotations for that region again, and draws the replacement on top.
  * Drawings and inserted images are painted above the original page. A text edit
  * then covers its own glyph box and draws the replacement above that, so the
- * new text stays readable.
+ * new text stays readable. Placed signatures come next, then created text,
+ * matching the order of those overlays in the editor.
  *
  * The original text operators are left in the content stream. Removing them
  * would mean rewriting shared content streams, TJ arrays, and form XObjects,
@@ -69,13 +105,15 @@ export async function exportEditedPdf(
   drawings: readonly DrawingAnnotation[] = [],
   images: readonly ImageAnnotation[] = [],
   texts: readonly NewTextAnnotation[] = [],
+  signatures: readonly SignatureAnnotation[] = [],
 ): Promise<Uint8Array> {
   if (
     edits.length === 0 &&
     highlights.length === 0 &&
     drawings.length === 0 &&
     images.length === 0 &&
-    texts.length === 0
+    texts.length === 0 &&
+    signatures.length === 0
   ) {
     return new Uint8Array(originalBytes.slice(0))
   }
@@ -149,6 +187,17 @@ export async function exportEditedPdf(
       edit,
       highlights.filter((markup) => markup.pageNumber === edit.pageNumber),
     )
+  }
+
+  const signatureImages = new Map<string, PDFImage>()
+  for (const signature of signatures) {
+    const page = pages[signature.pageNumber - 1]
+    if (!page) {
+      throw new Error(
+        `A signature refers to page ${signature.pageNumber}, which is not in this PDF.`,
+      )
+    }
+    await paintSignature(pdf, page, signature, signatureImages)
   }
 
   for (const created of texts) {
@@ -365,6 +414,40 @@ async function paintImage(
     y: image.y,
     width: image.width,
     height: image.height,
+  })
+}
+
+/**
+ * Draws the signature PNG in PDF user space, so on a rotated page it turns
+ * with the page as it does in the editor. pdf-lib keeps the PNG alpha channel
+ * as a soft mask. Placements that share a PNG share one image XObject.
+ */
+async function paintSignature(
+  pdf: PDFDocument,
+  page: PDFPage,
+  signature: SignatureAnnotation,
+  embedded: Map<string, PDFImage>,
+): Promise<void> {
+  if (
+    !Number.isFinite(signature.pdfX) ||
+    !Number.isFinite(signature.pdfY) ||
+    !(signature.width > 0) ||
+    !(signature.height > 0) ||
+    !Number.isFinite(signature.width) ||
+    !Number.isFinite(signature.height)
+  ) {
+    return
+  }
+  let image = embedded.get(signature.dataUrl)
+  if (!image) {
+    image = await pdf.embedPng(pngDataUrlToBytes(signature.dataUrl))
+    embedded.set(signature.dataUrl, image)
+  }
+  page.drawImage(image, {
+    x: signature.pdfX,
+    y: signature.pdfY,
+    width: signature.width,
+    height: signature.height,
   })
 }
 

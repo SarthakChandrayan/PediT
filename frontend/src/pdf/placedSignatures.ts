@@ -7,7 +7,6 @@ import {
   type ViewportPoint,
 } from './coordinates.ts'
 import type { DocumentSnapshot } from './documentHistory.ts'
-import type { ImageAnnotation } from './images.ts'
 import type { Signature } from './signatures.ts'
 
 /**
@@ -17,7 +16,8 @@ import type { Signature } from './signatures.ts'
  * points and always keep the `originalWidth / originalHeight` ratio of the
  * captured signature. `dataUrl` is copied from the reusable signature when it
  * is placed, so replacing that signature later does not change this overlay.
- * Screen position is derived from the current viewport.
+ * Screen position is derived from the current viewport. The working PDF bytes
+ * are unchanged until Save, Export, or a page operation paints the overlay in.
  */
 export type SignatureAnnotation = {
   id: string
@@ -275,27 +275,6 @@ export function withoutSignature(snapshot: DocumentSnapshot, id: string): Docume
     signatures: snapshot.signatures.filter((item) => item.id !== id),
     selectedSignatureId: snapshot.selectedSignatureId === id ? null : snapshot.selectedSignatureId,
   }
-}
-
-/**
- * Placed signatures as PNG image overlays. Page operations bake overlays
- * through the existing image path; save and export do not include signatures.
- */
-export function signaturesAsImages(
-  signatures: readonly SignatureAnnotation[],
-): ImageAnnotation[] {
-  return signatures.map((signature) => ({
-    id: signature.id,
-    pageNumber: signature.pageNumber,
-    x: signature.pdfX,
-    y: signature.pdfY,
-    width: signature.width,
-    height: signature.height,
-    originalWidth: signature.originalWidth,
-    originalHeight: signature.originalHeight,
-    format: 'png',
-    bytes: pngDataUrlToBytes(signature.dataUrl),
-  }))
 }
 
 export function pngDataUrlToBytes(dataUrl: string): Uint8Array {

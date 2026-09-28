@@ -22,14 +22,13 @@ import { VersionHistory } from './components/VersionHistory.tsx'
 import { DocumentHistoryProvider } from './pdf/DocumentHistoryProvider.tsx'
 import { useDocumentHistory } from './pdf/DocumentHistoryContext.tsx'
 import {
-  clonePdfBytes,
   shouldWarnOnUnload,
   withPageOperation,
   type DocumentSnapshot,
 } from './pdf/documentHistory.ts'
 import { type DrawingKind } from './pdf/drawings.ts'
 import { loadLocalImage } from './pdf/images.ts'
-import { exportEditedPdf } from './pdf/exportPdf.ts'
+import { exportDocumentSnapshot } from './pdf/exportPdf.ts'
 import {
   DEFAULT_HIGHLIGHT_COLOR,
   HIGHLIGHT_COLORS,
@@ -48,7 +47,6 @@ import {
   type AnnotationUiState,
   type PdfViewerHandle,
 } from './pdf/PdfViewer.tsx'
-import { signaturesAsImages } from './pdf/placedSignatures.ts'
 import { DEFAULT_PDF_SCALE, stepPdfScale } from './pdf/scale.ts'
 import { documentSaveState } from './ui/saveState.ts'
 
@@ -352,7 +350,7 @@ function Editor({
       const snapshot = history.getSettled()
       let exported: Uint8Array
       try {
-        exported = await exportSnapshot(snapshot)
+        exported = await exportDocumentSnapshot(snapshot)
       } catch (error) {
         setSaveError(exportErrorMessage(error))
         return
@@ -575,10 +573,7 @@ function Editor({
     setPageOpPending(true)
     setOpenError(null)
     try {
-      const base = await exportSnapshot({
-        ...snapshot,
-        images: [...snapshot.images, ...signaturesAsImages(snapshot.signatures)],
-      })
+      const base = await exportDocumentSnapshot(snapshot)
       if (openGeneration.current !== generation || history.getEpoch() !== epoch) {
         return
       }
@@ -668,7 +663,7 @@ function Editor({
     setExporting(true)
     setOpenError(null)
     try {
-      const exported = await exportSnapshot(workingSnapshot())
+      const exported = await exportDocumentSnapshot(workingSnapshot())
       downloadPdf(exported, editedFileName(fileName))
     } catch (error) {
       setOpenError(exportErrorMessage(error))
@@ -956,28 +951,6 @@ function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {
     selectedTextId: null,
     selectedSignatureId: null,
   }
-}
-
-async function exportSnapshot(snapshot: DocumentSnapshot): Promise<Uint8Array> {
-  if (
-    snapshot.edits.length === 0 &&
-    snapshot.markups.length === 0 &&
-    snapshot.drawings.length === 0 &&
-    snapshot.images.length === 0 &&
-    (snapshot.texts?.length ?? 0) === 0
-  ) {
-    return clonePdfBytes(snapshot.pdfBytes)
-  }
-  const copy = new ArrayBuffer(snapshot.pdfBytes.byteLength)
-  new Uint8Array(copy).set(snapshot.pdfBytes)
-  return exportEditedPdf(
-    copy,
-    snapshot.edits,
-    snapshot.markups,
-    snapshot.drawings,
-    snapshot.images,
-    snapshot.texts ?? [],
-  )
 }
 
 function isNativeTextUndoTarget(target: EventTarget | null): boolean {
