@@ -14,7 +14,9 @@ type ThumbnailSidebarProps = {
 
 export function ThumbnailSidebar({ pdf, currentPage, onSelectPage }: ThumbnailSidebarProps) {
   const listRef = useRef<HTMLDivElement>(null)
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 720px)').matches,
+  )
   const pages = thumbnailPageNumbers(pdf.numPages)
 
   useEffect(() => {
@@ -49,7 +51,7 @@ export function ThumbnailSidebar({ pdf, currentPage, onSelectPage }: ThumbnailSi
           className="sidebar__toggle"
           aria-label={collapsed ? 'Expand page sidebar' : 'Collapse page sidebar'}
           aria-expanded={!collapsed}
-          title={collapsed ? 'Show pages' : 'Hide pages'}
+          data-tooltip={collapsed ? 'Show pages' : 'Hide pages'}
           onClick={() => {
             setCollapsed((current) => !current)
           }}

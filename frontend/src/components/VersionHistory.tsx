@@ -3,6 +3,9 @@ import {
   getDocumentVersions,
   type DocumentVersionRecord,
 } from '../api/documents.ts'
+import { formatFullTime, formatRelativeTime } from '../ui/relativeTime.ts'
+import { Icon } from './icons.tsx'
+import { Menu, MenuHeading, MenuItem } from './Menu.tsx'
 
 type VersionHistoryProps = {
   documentId: string | null
@@ -59,7 +62,7 @@ export function VersionHistory({
     }
   }, [documentId, refreshKey])
 
-  if (!documentId) {
+  if (!documentId || currentVersion === null) {
     return null
   }
 
@@ -67,38 +70,50 @@ export function VersionHistory({
   const error = loaded.documentId === documentId ? loaded.error : null
 
   return (
-    <section className="versions" aria-label="Version history">
-      <h2>Versions</h2>
-      {error ? <p className="versions__error">{error}</p> : null}
-      {versions.length === 0 && !error ? <p>Loading versions…</p> : null}
-      <ul>
+    <Menu
+      label="Version history"
+      align="end"
+      trigger={(props) => (
+        <button
+          {...props}
+          type="button"
+          className="button button--ghost version-trigger"
+          aria-label={`Version ${currentVersion}. Version history`}
+          data-tooltip="Version history"
+        >
+          <Icon name="history" />
+          <span>v{currentVersion}</span>
+          <Icon name="chevronDown" size={12} />
+        </button>
+      )}
+    >
+      <MenuHeading>Saved versions</MenuHeading>
+      {error ? <p className="menu__note menu__note--error">{error}</p> : null}
+      {versions.length === 0 && !error ? <p className="menu__note">Loading…</p> : null}
+      <div className="menu__scroll">
         {versions.map((version) => {
           const current = version.version === currentVersion
           return (
-            <li key={version.id} data-current={current ? 'true' : undefined}>
-              <span>Version {version.version}</span>
-              <time dateTime={version.createdAt}>{formatVersionTime(version.createdAt)}</time>
-              {current ? <span>Current</span> : null}
-              <button
-                type="button"
-                aria-label={`Open version ${version.version}`}
-                onClick={() => onOpen(version)}
-              >
-                Open
-              </button>
-            </li>
+            <MenuItem
+              key={version.id}
+              checked={current}
+              hint={
+                <time dateTime={version.createdAt} title={formatFullTime(version.createdAt)}>
+                  {formatRelativeTime(version.createdAt)}
+                </time>
+              }
+              onSelect={() => {
+                if (!current) {
+                  onOpen(version)
+                }
+              }}
+            >
+              Version {version.version}
+              {current ? <span className="menu__tag">Current</span> : null}
+            </MenuItem>
           )
         })}
-      </ul>
-    </section>
+      </div>
+    </Menu>
   )
-}
-
-function formatVersionTime(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return value
-  }
-
-  return date.toLocaleString()
 }

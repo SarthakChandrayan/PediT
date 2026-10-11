@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ChangeEvent } from 'react'
 import {
   getDocumentVersionFile,
   type DocumentListItem,
@@ -10,10 +10,13 @@ import { AuthProvider } from './auth/AuthContext.tsx'
 import { useAuth } from './auth/useAuth.ts'
 import { AuthScreen } from './auth/AuthScreen.tsx'
 import { Banner, BANNER_AUTO_DISMISS_MS } from './components/Banner.tsx'
+import { useConfirm } from './components/confirm.ts'
+import { ConfirmProvider } from './components/ConfirmDialog.tsx'
 import { DocumentsDashboard } from './components/DocumentsDashboard.tsx'
-import { EditorHeader } from './components/EditorHeader.tsx'
+import { AppBrand, EditorHeader } from './components/EditorHeader.tsx'
 import { SignatureDialog } from './components/SignatureDialog.tsx'
 import { Toolbar } from './components/Toolbar.tsx'
+import { TooltipLayer } from './components/TooltipLayer.tsx'
 import { SearchProvider, useSearch } from './pdf/SearchContext.tsx'
 import { useSignature } from './pdf/SignatureContext.tsx'
 import { SignatureProvider } from './pdf/SignatureProvider.tsx'
@@ -60,36 +63,34 @@ function App() {
 
 function AuthenticatedApp() {
   const auth = useAuth()
-  if (auth.status === 'loading') {
-    return <SessionCheckScreen />
-  }
-  if (!auth.configured || auth.status !== 'authenticated') {
-    return <AuthScreen />
-  }
-
   return (
-    <DocumentHistoryProvider>
-      <SignatureProvider>
-        <Editor
-          userEmail={auth.email}
-          onLogout={() => {
-            void auth.signOut()
-          }}
-        />
-      </SignatureProvider>
-    </DocumentHistoryProvider>
+    <ConfirmProvider>
+      <TooltipLayer />
+      {auth.status === 'loading' ? (
+        <SessionCheckScreen />
+      ) : !auth.configured || auth.status !== 'authenticated' ? (
+        <AuthScreen />
+      ) : (
+        <DocumentHistoryProvider>
+          <SignatureProvider>
+            <Editor
+              userEmail={auth.email}
+              onLogout={() => {
+                void auth.signOut()
+              }}
+            />
+          </SignatureProvider>
+        </DocumentHistoryProvider>
+      )}
+    </ConfirmProvider>
   )
 }
 
 function SessionCheckScreen() {
   return (
-    <div className="app" aria-busy="true">
-      <header className="app-header">
-        <div className="app-header__brand">
-          <img className="app-header__logo" src="/mainlogo.png" alt="PeDit" />
-        </div>
-      </header>
-      <main className="workspace" />
+    <div className="session-check" aria-busy="true">
+      <AppBrand />
+      <span className="spinner" role="status" aria-label="Checking your session" />
     </div>
   )
 }
@@ -103,6 +104,7 @@ function Editor({
 }) {
   const history = useDocumentHistory()
   const signatures = useSignature()
+  const confirm = useConfirm()
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
   const viewerRef = useRef<PdfViewerHandle>(null)
@@ -130,9 +132,6 @@ function Editor({
   const resetHistoryRef = useRef(history.reset)
   const undoRef = useRef(history.undo)
   const redoRef = useRef(history.redo)
-  resetHistoryRef.current = history.reset
-  undoRef.current = history.undo
-  redoRef.current = history.redo
   const [documentSession, setDocumentSession] = useState(0)
   const [highlightColor, setHighlightColor] = useState<HighlightColorName>(
     DEFAULT_HIGHLIGHT_COLOR,
@@ -150,8 +149,21 @@ function Editor({
     hasUncommittedEdit: false,
   })
   const historyDirtyRef = useRef(history.isDirty)
-  historyDirtyRef.current = history.isDirty
+  const saveShortcutRef = useRef<(() => void) | null>(null)
   const [restoring, setRestoring] = useState(() => readStoredDocument() !== null)
+
+  // Window listeners read the latest history and save handlers through refs.
+  useLayoutEffect(() => {
+    resetHistoryRef.current = history.reset
+    undoRef.current = history.undo
+    redoRef.current = history.redo
+    historyDirtyRef.current = history.isDirty
+    saveShortcutRef.current = fileName
+      ? () => {
+          void handleSave()
+        }
+      : null
+  })
 
   useEffect(() => {
     const generation = uploadGeneration.current
@@ -239,6 +251,25 @@ function Editor({
     }
   }, [])
 
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const meta = event.ctrlKey || event.metaKey
+      if (!meta || event.altKey || event.shiftKey || event.key.toLowerCase() !== 's') {
+        return
+      }
+      const save = saveShortcutRef.current
+      if (!save) {
+        return
+      }
+      event.preventDefault()
+      save()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [])
+
   function openFilePicker() {
     fileInputRef.current?.click()
   }
@@ -262,6 +293,13 @@ function Editor({
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) {
+      return
+    }
+    await openLocalFile(file)
+  }
+
+  async function openLocalFile(file: File) {
+    if (hasUnsavedEdits() && !(await confirmDiscard())) {
       return
     }
 
@@ -382,7 +420,7 @@ function Editor({
       return
     }
 
-    if (hasUnsavedEdits() && !window.confirm(UNSAVED_VERSION_MESSAGE)) {
+    if (hasUnsavedEdits() && !(await confirmDiscard('version'))) {
       return
     }
 
@@ -425,16 +463,29 @@ function Editor({
 
   function hasUnsavedEdits(): boolean {
     return shouldWarnOnUnload(
-      history.isDirty,
+      history.isDirtyNow(),
       viewerRef.current?.hasUncommittedEdit() ?? false,
     )
+  }
+
+  function confirmDiscard(target: 'document' | 'version' = 'document'): Promise<boolean> {
+    return confirm({
+      title: 'Discard unsaved changes?',
+      body:
+        target === 'version'
+          ? 'Opening another version replaces what’s in the editor. Save first if you want to keep your edits.'
+          : 'Your latest edits haven’t been saved as a version yet. Save first if you want to keep them.',
+      confirmLabel: 'Discard changes',
+      cancelLabel: 'Keep editing',
+      tone: 'danger',
+    })
   }
 
   async function handleOpenListedDocument(document: DocumentListItem) {
     if (openingDocumentId !== null) {
       return
     }
-    if (hasUnsavedEdits() && !window.confirm(UNSAVED_DOCUMENT_MESSAGE)) {
+    if (hasUnsavedEdits() && !(await confirmDiscard())) {
       return
     }
 
@@ -485,8 +536,8 @@ function Editor({
     }
   }
 
-  function handleBackToDocuments() {
-    if (hasUnsavedEdits() && !window.confirm(UNSAVED_DOCUMENT_MESSAGE)) {
+  async function handleBackToDocuments() {
+    if (hasUnsavedEdits() && !(await confirmDiscard())) {
       return
     }
 
@@ -694,10 +745,23 @@ function Editor({
           !pageOpPending &&
           (history.isDirty || annotationUi.hasUncommittedEdit)
         }
+        uploading={fileName !== null && documentId === null && uploadError === null}
         saving={saving}
         exporting={exporting}
         hasDocument={fileName !== null}
-        onDocuments={handleBackToDocuments}
+        versions={
+          <VersionHistory
+            documentId={documentId}
+            currentVersion={currentVersion}
+            refreshKey={versionListRevision}
+            onOpen={(version) => {
+              void handleOpenVersion(version)
+            }}
+          />
+        }
+        onDocuments={() => {
+          void handleBackToDocuments()
+        }}
         onOpen={openFilePicker}
         onSave={() => {
           void handleSave()
@@ -726,15 +790,112 @@ function Editor({
           void handleFileChange(event)
         }}
       />
-      <main className="workspace">
-        <VersionHistory
-          documentId={documentId}
-          currentVersion={currentVersion}
-          refreshKey={versionListRevision}
-          onOpen={(version) => {
-            void handleOpenVersion(version)
+      {fileName ? (
+        <Toolbar
+          currentPage={currentPage}
+          pageCount={pageCount}
+          scale={scale}
+          pageOpsDisabled={pageCount < 1 || pageOpPending || saving || exporting}
+          canDeletePage={pageCount > 1}
+          canMovePageUp={currentPage > 1}
+          canMovePageDown={pageCount > 0 && currentPage > 0 && currentPage < pageCount}
+          onZoomIn={() => setScale((current) => stepPdfScale(current, 1))}
+          onZoomOut={() => setScale((current) => stepPdfScale(current, -1))}
+          onZoomTo={setScale}
+          onFitWidth={() => {
+            const next = viewerRef.current?.fitScale('width')
+            if (next != null) {
+              setScale(next)
+            }
           }}
+          onFitPage={() => {
+            const next = viewerRef.current?.fitScale('page')
+            if (next != null) {
+              setScale(next)
+            }
+          }}
+          onJumpToPage={(page) => {
+            setFocusPage(page)
+            viewerRef.current?.jumpToPage(page)
+          }}
+          canUndo={history.canUndo && !pageOpPending && !saving}
+          canRedo={history.canRedo && !pageOpPending && !saving}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          onDeletePage={handleDeletePage}
+          onRotatePage={handleRotatePage}
+          onDuplicatePage={handleDuplicatePage}
+          onMovePageUp={handleMovePageUp}
+          onMovePageDown={handleMovePageDown}
+          onAddBlankPage={handleAddBlankPage}
+          canHighlight={annotationUi.canHighlight}
+          canRemoveHighlight={annotationUi.canRemoveHighlight}
+          highlightColor={highlightColor}
+          onHighlightColor={setHighlightColor}
+          onHighlightPointerDown={() => {
+            viewerRef.current?.captureTextSelection()
+          }}
+          onHighlight={() => {
+            viewerRef.current?.applyHighlight(HIGHLIGHT_COLORS[highlightColor])
+          }}
+          onUnderline={() => {
+            viewerRef.current?.applyUnderline()
+          }}
+          onStrikethrough={() => {
+            viewerRef.current?.applyStrikethrough()
+          }}
+          onRemoveHighlight={() => {
+            viewerRef.current?.removeSelectedHighlight()
+          }}
+          drawingTool={annotationUi.drawingTool}
+          onDrawingTool={(tool: DrawingKind) => {
+            viewerRef.current?.setDrawingTool(tool)
+          }}
+          textTool={annotationUi.textTool}
+          onTextTool={() => {
+            viewerRef.current?.setTextTool()
+          }}
+          onSelectTool={() => {
+            const tool = annotationUi.drawingTool
+            if (tool) {
+              viewerRef.current?.setDrawingTool(tool)
+            }
+            if (annotationUi.textTool) {
+              viewerRef.current?.setTextTool(false)
+            }
+            if (annotationUi.signatureTool) {
+              viewerRef.current?.stopSignaturePlacement()
+            }
+          }}
+          selectedNewText={annotationUi.selectedNewText}
+          selectedImage={annotationUi.selectedImage}
+          selectedDrawing={annotationUi.selectedDrawing}
+          hasSignature={signatures.signature !== null}
+          onNewTextStyle={(patch) => {
+            viewerRef.current?.patchSelectedNewText(patch)
+          }}
+          onInsertImage={() => {
+            imageInputRef.current?.click()
+          }}
+          signatureTool={annotationUi.signatureTool}
+          signaturePreview={signatures.signature?.dataUrl ?? null}
+          selectedSignature={annotationUi.selectedSignature}
+          onSignature={() => {
+            const signature = signatures.signature
+            if (!signature) {
+              signatures.openDialog()
+              return
+            }
+            if (annotationUi.signatureTool) {
+              viewerRef.current?.stopSignaturePlacement()
+              return
+            }
+            viewerRef.current?.startSignaturePlacement(signature)
+          }}
+          onNewSignature={signatures.openDialog}
         />
+      ) : null}
+      <main className="workspace">
         <div className="workspace__alerts">
           {openError ? (
             <Banner
@@ -769,122 +930,24 @@ function Editor({
             onAnnotationStateChange={setAnnotationUi}
           />
         ) : restoring ? (
-          <p className="viewer-status" role="status">
+          <div className="viewer-status" role="status">
+            <span className="spinner" aria-hidden="true" />
             Opening your document…
-          </p>
+          </div>
         ) : (
           <DocumentsDashboard
             refreshKey={dashboardRefreshKey}
             openingId={openingDocumentId}
             onUpload={openFilePicker}
+            onDropFile={(file) => {
+              void openLocalFile(file)
+            }}
             onOpenDocument={(document) => {
               void handleOpenListedDocument(document)
             }}
           />
         )}
       </main>
-      <Toolbar
-        currentPage={currentPage}
-        pageCount={pageCount}
-        scale={scale}
-        pageOpsDisabled={pageCount < 1 || pageOpPending || saving || exporting}
-        canDeletePage={pageCount > 1}
-        canMovePageUp={currentPage > 1}
-        canMovePageDown={pageCount > 0 && currentPage > 0 && currentPage < pageCount}
-        onZoomIn={() => setScale((current) => stepPdfScale(current, 1))}
-        onZoomOut={() => setScale((current) => stepPdfScale(current, -1))}
-        onFitWidth={() => {
-          const next = viewerRef.current?.fitScale('width')
-          if (next != null) {
-            setScale(next)
-          }
-        }}
-        onFitPage={() => {
-          const next = viewerRef.current?.fitScale('page')
-          if (next != null) {
-            setScale(next)
-          }
-        }}
-        onJumpToPage={(page) => {
-          setFocusPage(page)
-          viewerRef.current?.jumpToPage(page)
-        }}
-        canUndo={history.canUndo && !pageOpPending && !saving}
-        canRedo={history.canRedo && !pageOpPending && !saving}
-        onUndo={handleUndo}
-        onRedo={handleRedo}
-        onDeletePage={handleDeletePage}
-        onRotatePage={handleRotatePage}
-        onDuplicatePage={handleDuplicatePage}
-        onMovePageUp={handleMovePageUp}
-        onMovePageDown={handleMovePageDown}
-        onAddBlankPage={handleAddBlankPage}
-        canHighlight={annotationUi.canHighlight}
-        canRemoveHighlight={annotationUi.canRemoveHighlight}
-        highlightColor={highlightColor}
-        onHighlightColor={setHighlightColor}
-        onHighlightPointerDown={() => {
-          viewerRef.current?.captureTextSelection()
-        }}
-        onHighlight={() => {
-          viewerRef.current?.applyHighlight(HIGHLIGHT_COLORS[highlightColor])
-        }}
-        onUnderline={() => {
-          viewerRef.current?.applyUnderline()
-        }}
-        onStrikethrough={() => {
-          viewerRef.current?.applyStrikethrough()
-        }}
-        onRemoveHighlight={() => {
-          viewerRef.current?.removeSelectedHighlight()
-        }}
-        drawingTool={annotationUi.drawingTool}
-        onDrawingTool={(tool: DrawingKind) => {
-          viewerRef.current?.setDrawingTool(tool)
-        }}
-        textTool={annotationUi.textTool}
-        onTextTool={() => {
-          viewerRef.current?.setTextTool()
-        }}
-        onSelectTool={() => {
-          const tool = annotationUi.drawingTool
-          if (tool) {
-            viewerRef.current?.setDrawingTool(tool)
-          }
-          if (annotationUi.textTool) {
-            viewerRef.current?.setTextTool(false)
-          }
-          if (annotationUi.signatureTool) {
-            viewerRef.current?.stopSignaturePlacement()
-          }
-        }}
-        selectedNewText={annotationUi.selectedNewText}
-        selectedImage={annotationUi.selectedImage}
-        selectedDrawing={annotationUi.selectedDrawing}
-        hasSignature={signatures.signature !== null}
-        onNewTextStyle={(patch) => {
-          viewerRef.current?.patchSelectedNewText(patch)
-        }}
-        onInsertImage={() => {
-          imageInputRef.current?.click()
-        }}
-        signatureTool={annotationUi.signatureTool}
-        signaturePreview={signatures.signature?.dataUrl ?? null}
-        selectedSignature={annotationUi.selectedSignature}
-        onSignature={() => {
-          const signature = signatures.signature
-          if (!signature) {
-            signatures.openDialog()
-            return
-          }
-          if (annotationUi.signatureTool) {
-            viewerRef.current?.stopSignaturePlacement()
-            return
-          }
-          viewerRef.current?.startSignaturePlacement(signature)
-        }}
-        onNewSignature={signatures.openDialog}
-      />
       {signatures.dialogOpen ? (
         <SignatureDialog
           onCancel={signatures.cancelDialog}
@@ -932,8 +995,6 @@ function SearchHotkeys({ documentOpen }: { documentOpen: boolean }) {
   return null
 }
 
-const UNSAVED_VERSION_MESSAGE = 'You have unsaved changes. Open this version anyway?'
-const UNSAVED_DOCUMENT_MESSAGE = 'You have unsaved changes. Leave this document anyway?'
 const OPEN_DOCUMENT_KEY = 'pdfforge.openDocument'
 
 function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {

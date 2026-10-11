@@ -81,6 +81,9 @@ import {
 } from './newTexts.ts'
 import { usePdfDocument } from './usePdfDocument.ts'
 
+/** Space left above a page scrolled into view, so it never sits flush under the toolbar. */
+const PAGE_SCROLL_MARGIN = 20
+
 export type {
   DrawingAnnotation,
   DrawingKind,
@@ -523,7 +526,7 @@ export function PdfViewer({
     }
     const rootTop = root.getBoundingClientRect().top
     const targetTop = geometry.element.getBoundingClientRect().top
-    root.scrollTop += targetTop - rootTop
+    root.scrollTop += targetTop - rootTop - PAGE_SCROLL_MARGIN
   }, [scrollMatchIntoView])
 
   const unregisterGeometry = useCallback((pageNumber: number) => {
@@ -1383,7 +1386,7 @@ export function PdfViewer({
     }
     const rootTop = root.getBoundingClientRect().top
     const targetTop = element.getBoundingClientRect().top
-    root.scrollTop += targetTop - rootTop
+    root.scrollTop += targetTop - rootTop - PAGE_SCROLL_MARGIN
   }, [])
 
   useEffect(() => {

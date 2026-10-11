@@ -15,6 +15,7 @@ import {
 } from '../pdf/highlights.ts'
 import { MAX_PDF_SCALE, MIN_PDF_SCALE } from '../pdf/scale.ts'
 import { Icon, type IconName } from './icons.tsx'
+import { Menu, MenuHeading, MenuItem, MenuSeparator } from './Menu.tsx'
 
 type ToolbarProps = {
   currentPage: number
@@ -26,6 +27,7 @@ type ToolbarProps = {
   canMovePageDown: boolean
   onZoomIn: () => void
   onZoomOut: () => void
+  onZoomTo: (scale: number) => void
   onFitWidth: () => void
   onFitPage: () => void
   onJumpToPage: (pageNumber: number) => void
@@ -68,6 +70,29 @@ type ToolbarProps = {
   onNewSignature: () => void
 }
 
+const ZOOM_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3]
+
+const IS_APPLE =
+  typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.userAgent)
+const MOD = IS_APPLE ? '⌘' : 'Ctrl+'
+const SHIFT = IS_APPLE ? '⇧' : 'Shift+'
+
+
+const DRAW_TOOLS = [
+  ['freehand', 'Pen', 'pen'],
+  ['line', 'Line', 'line'],
+  ['arrow', 'Arrow', 'arrow'],
+  ['rectangle', 'Rectangle', 'rectangle'],
+  ['ellipse', 'Ellipse', 'ellipse'],
+] as const
+
+const SWATCH_LABELS: Record<HighlightColorName, string> = {
+  yellow: 'Yellow',
+  green: 'Green',
+  blue: 'Blue',
+  pink: 'Pink',
+}
+
 export function Toolbar({
   currentPage,
   pageCount,
@@ -78,6 +103,7 @@ export function Toolbar({
   canMovePageDown,
   onZoomIn,
   onZoomOut,
+  onZoomTo,
   onFitWidth,
   onFitPage,
   onJumpToPage,
@@ -126,277 +152,304 @@ export function Toolbar({
     !selectedImage &&
     !selectedDrawing &&
     !selectedSignature
+  const keepSelection = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault()
+    onHighlightPointerDown()
+  }
+
+  const hasContext =
+    selectedNewText !== null ||
+    selectedImage !== null ||
+    selectedDrawing ||
+    signatureTool ||
+    selectedSignature !== null
 
   return (
-    <div className="editor-toolbar" role="toolbar" aria-label="Editor tools">
-      <div className="editor-toolbar__tools">
-        <div className="tool-group" aria-label="Select">
-          <ToolButton
-            label="Select"
-            icon="select"
-            pressed={hasDocument && selectActive}
-            disabled={!hasDocument}
-            onClick={onSelectTool}
-          />
-        </div>
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="Edit">
-          <ToolButton
-            label="Add text"
-            icon="addText"
-            pressed={textTool}
-            disabled={pageOpsDisabled}
-            onClick={onTextTool}
-          />
-        </div>
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="Annotate">
-          <ToolButton
-            label="Highlight"
-            icon="highlight"
-            disabled={pageOpsDisabled || !canHighlight}
-            onMouseDown={(event) => {
-              event.preventDefault()
-              onHighlightPointerDown()
-            }}
-            onClick={onHighlight}
-          />
-          <ToolButton
-            label="Underline"
-            icon="underline"
-            disabled={pageOpsDisabled || !canHighlight}
-            onMouseDown={(event) => {
-              event.preventDefault()
-              onHighlightPointerDown()
-            }}
-            onClick={onUnderline}
-          />
-          <ToolButton
-            label="Strikethrough"
-            icon="strikethrough"
-            disabled={pageOpsDisabled || !canHighlight}
-            onMouseDown={(event) => {
-              event.preventDefault()
-              onHighlightPointerDown()
-            }}
-            onClick={onStrikethrough}
-          />
-          {(Object.keys(HIGHLIGHT_COLORS) as HighlightColorName[]).map((color) => (
-            <button
-              key={color}
-              type="button"
-              className="tool swatch"
-              data-color={color}
-              aria-pressed={highlightColor === color}
-              aria-label={`${color} highlight`}
-              data-tooltip={`${color} highlight`}
-              disabled={pageOpsDisabled}
-              onMouseDown={(event) => {
-                event.preventDefault()
-              }}
-              onClick={() => {
-                onHighlightColor(color)
-              }}
-            />
-          ))}
-          {showMarkupRemove ? (
+    <>
+      <div
+        className="editor-toolbar"
+        role="toolbar"
+        aria-label="Editor tools"
+        onWheel={(event) => {
+          const bar = event.currentTarget
+          if (bar.scrollWidth > bar.clientWidth && Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+            bar.scrollLeft += event.deltaY
+          }
+        }}
+      >
+        <div className="editor-toolbar__tools">
+          <div className="tool-group" role="group" aria-label="History">
             <ToolButton
-              label="Remove markup"
-              icon="trash"
-              danger
-              disabled={pageOpsDisabled || !canRemoveHighlight}
-              onClick={onRemoveHighlight}
+              label="Undo"
+              hint={`${MOD}Z`}
+              icon="undo"
+              disabled={!canUndo}
+              shortcut="Control+Z Meta+Z"
+              onClick={onUndo}
             />
+            <ToolButton
+              label="Redo"
+              hint={`${MOD}${SHIFT}Z`}
+              icon="redo"
+              disabled={!canRedo}
+              shortcut="Control+Shift+Z Meta+Shift+Z Control+Y"
+              onClick={onRedo}
+            />
+          </div>
+          <Divider />
+          <div className="tool-group" role="group" aria-label="Mode">
+            <ToolButton
+              label="Select"
+              icon="select"
+              pressed={hasDocument && selectActive}
+              disabled={!hasDocument}
+              onClick={onSelectTool}
+            />
+            <ToolButton
+              label="Add text"
+              icon="addText"
+              pressed={textTool}
+              disabled={pageOpsDisabled}
+              onClick={onTextTool}
+            />
+          </div>
+          <Divider />
+          <div className="tool-group" role="group" aria-label="Markup">
+            <ToolButton
+              label="Highlight selected text"
+              icon="highlight"
+              disabled={pageOpsDisabled || !canHighlight}
+              onMouseDown={keepSelection}
+              onClick={onHighlight}
+            />
+            <div className="swatches" role="radiogroup" aria-label="Highlight color">
+              {(Object.keys(HIGHLIGHT_COLORS) as HighlightColorName[]).map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  role="radio"
+                  className="swatch"
+                  data-color={color}
+                  aria-checked={highlightColor === color}
+                  aria-label={`${SWATCH_LABELS[color]} highlight`}
+                  data-tooltip={`${SWATCH_LABELS[color]}`}
+                  disabled={pageOpsDisabled}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                  }}
+                  onClick={() => {
+                    onHighlightColor(color)
+                  }}
+                />
+              ))}
+            </div>
+            <ToolButton
+              label="Underline selected text"
+              icon="underline"
+              disabled={pageOpsDisabled || !canHighlight}
+              onMouseDown={keepSelection}
+              onClick={onUnderline}
+            />
+            <ToolButton
+              label="Strike through selected text"
+              icon="strikethrough"
+              disabled={pageOpsDisabled || !canHighlight}
+              onMouseDown={keepSelection}
+              onClick={onStrikethrough}
+            />
+            {showMarkupRemove ? (
+              <ToolButton
+                label="Remove markup"
+                icon="trash"
+                danger
+                disabled={pageOpsDisabled || !canRemoveHighlight}
+                onClick={onRemoveHighlight}
+              />
+            ) : null}
+          </div>
+          <Divider />
+          <div className="tool-group" role="group" aria-label="Draw">
+            {DRAW_TOOLS.map(([kind, label, icon]) => (
+              <ToolButton
+                key={kind}
+                label={label}
+                icon={icon}
+                pressed={drawingTool === kind}
+                disabled={pageOpsDisabled}
+                onClick={() => {
+                  onDrawingTool(kind)
+                }}
+              />
+            ))}
+          </div>
+          <Divider />
+          <div className="tool-group" role="group" aria-label="Insert">
+            <ToolButton
+              label="Insert image"
+              icon="image"
+              disabled={pageOpsDisabled}
+              onClick={onInsertImage}
+            />
+            <ToolButton
+              label={hasSignature ? 'Place signature' : 'Create signature'}
+              icon="signature"
+              pressed={hasSignature ? signatureTool : undefined}
+              hasPopup={hasSignature ? undefined : 'dialog'}
+              disabled={pageOpsDisabled}
+              onClick={onSignature}
+            />
+          </div>
+          <Divider />
+          <PageMenu
+            currentPage={currentPage}
+            disabled={pageOpsDisabled}
+            canDeletePage={canDeletePage}
+            canMovePageUp={canMovePageUp}
+            canMovePageDown={canMovePageDown}
+            onRotatePage={onRotatePage}
+            onDuplicatePage={onDuplicatePage}
+            onAddBlankPage={onAddBlankPage}
+            onMovePageUp={onMovePageUp}
+            onMovePageDown={onMovePageDown}
+            onDeletePage={onDeletePage}
+          />
+        </div>
+        <div className="editor-toolbar__view">
+          <SearchControls disabled={!hasDocument} />
+          <Divider />
+          <PageJump
+            currentPage={currentPage}
+            pageCount={pageCount}
+            disabled={!hasDocument}
+            onJumpToPage={onJumpToPage}
+          />
+          <Divider />
+          <div className="tool-group" role="group" aria-label="Zoom">
+            <ToolButton
+              label="Zoom out"
+              icon="zoomOut"
+              disabled={!hasDocument || scale <= MIN_PDF_SCALE}
+              onClick={onZoomOut}
+            />
+            <Menu
+              label="Zoom"
+              align="end"
+              trigger={(props) => (
+                <button
+                  {...props}
+                  type="button"
+                  className="zoom-trigger"
+                  disabled={!hasDocument}
+                  aria-label={`Zoom ${zoomPercent}%`}
+                >
+                  <span aria-live="polite">{zoomPercent}%</span>
+                  <Icon name="chevronDown" size={12} />
+                </button>
+              )}
+            >
+              <MenuItem icon="fitWidth" onSelect={onFitWidth}>
+                Fit width
+              </MenuItem>
+              <MenuItem icon="fitPage" onSelect={onFitPage}>
+                Fit page
+              </MenuItem>
+              <MenuSeparator />
+              {ZOOM_PRESETS.filter((value) => value >= MIN_PDF_SCALE && value <= MAX_PDF_SCALE).map(
+                (value) => (
+                  <MenuItem
+                    key={value}
+                    checked={Math.abs(scale - value) < 0.005}
+                    onSelect={() => {
+                      onZoomTo(value)
+                    }}
+                  >
+                    {Math.round(value * 100)}%
+                  </MenuItem>
+                ),
+              )}
+            </Menu>
+            <ToolButton
+              label="Zoom in"
+              icon="zoomIn"
+              disabled={!hasDocument || scale >= MAX_PDF_SCALE}
+              onClick={onZoomIn}
+            />
+          </div>
+        </div>
+      </div>
+      {hasContext ? (
+        <div className="context-dock">
+          {selectedNewText ? (
+            <TextStyleControls selected={selectedNewText} onChange={onNewTextStyle} onDelete={onRemoveHighlight} />
+          ) : null}
+          {selectedImage ? (
+            <div className="context-bar" aria-label="Selected image" role="group">
+              <span className="context-bar__title">Image</span>
+              <span className="context-bar__metric">
+                {Math.round(selectedImage.width)} × {Math.round(selectedImage.height)} pt
+              </span>
+              <ToolButton label="Delete image" icon="trash" danger onClick={onRemoveHighlight} />
+            </div>
+          ) : null}
+          {selectedDrawing ? (
+            <div className="context-bar" aria-label="Selected drawing" role="group">
+              <span className="context-bar__title">Drawing</span>
+              <ToolButton label="Delete drawing" icon="trash" danger onClick={onRemoveHighlight} />
+            </div>
+          ) : null}
+          {signatureTool ? (
+            <div className="context-bar" aria-label="Signature placement" role="group">
+              {signaturePreview ? (
+                <img className="context-bar__signature" src={signaturePreview} alt="Current signature" />
+              ) : null}
+              <span className="context-bar__metric">Click a page to place · Esc to stop</span>
+              <button
+                type="button"
+                className="button button--ghost button--sm"
+                aria-haspopup="dialog"
+                onClick={onNewSignature}
+              >
+                Redraw
+              </button>
+            </div>
+          ) : null}
+          {selectedSignature && !signatureTool ? (
+            <div className="context-bar" aria-label="Selected signature" role="group">
+              <span className="context-bar__title">Signature</span>
+              <span className="context-bar__metric">
+                {Math.round(selectedSignature.width)} × {Math.round(selectedSignature.height)} pt
+              </span>
+              <ToolButton label="Delete signature" icon="trash" danger onClick={onRemoveHighlight} />
+            </div>
           ) : null}
         </div>
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="Draw">
-          {(
-            [
-              ['freehand', 'Freehand', 'pen'],
-              ['line', 'Line', 'line'],
-              ['arrow', 'Arrow', 'arrow'],
-              ['rectangle', 'Rectangle', 'rectangle'],
-              ['ellipse', 'Ellipse', 'ellipse'],
-            ] as const
-          ).map(([kind, label, icon]) => (
-            <ToolButton
-              key={kind}
-              label={label}
-              icon={icon}
-              pressed={drawingTool === kind}
-              disabled={pageOpsDisabled}
-              onClick={() => {
-                onDrawingTool(kind)
-              }}
-            />
-          ))}
-        </div>
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="Insert">
-          <ToolButton
-            label="Insert image"
-            icon="image"
-            disabled={pageOpsDisabled}
-            onClick={onInsertImage}
-          />
-          <ToolButton
-            label={hasSignature ? 'Place signature' : 'Signature'}
-            icon="signature"
-            pressed={hasSignature ? signatureTool : undefined}
-            hasPopup={hasSignature ? undefined : 'dialog'}
-            disabled={pageOpsDisabled}
-            onClick={onSignature}
-          />
-        </div>
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="Page operations">
-          <ToolButton
-            label="Delete page"
-            icon="trash"
-            danger
-            disabled={pageOpsDisabled || !canDeletePage}
-            onClick={onDeletePage}
-          />
-          <ToolButton
-            label="Rotate page 90° clockwise"
-            icon="rotate"
-            disabled={pageOpsDisabled}
-            onClick={onRotatePage}
-          />
-          <ToolButton
-            label="Duplicate page"
-            icon="duplicate"
-            disabled={pageOpsDisabled}
-            onClick={onDuplicatePage}
-          />
-          <ToolButton
-            label="Move page up"
-            icon="moveUp"
-            disabled={pageOpsDisabled || !canMovePageUp}
-            onClick={onMovePageUp}
-          />
-          <ToolButton
-            label="Move page down"
-            icon="moveDown"
-            disabled={pageOpsDisabled || !canMovePageDown}
-            onClick={onMovePageDown}
-          />
-          <ToolButton
-            label="Insert blank page"
-            icon="addPage"
-            disabled={pageOpsDisabled}
-            onClick={onAddBlankPage}
-          />
-        </div>
-        {selectedNewText ? (
-          <TextStyleControls selected={selectedNewText} onChange={onNewTextStyle} onDelete={onRemoveHighlight} />
-        ) : null}
-        {selectedImage ? (
-          <ImageControls size={selectedImage} onDelete={onRemoveHighlight} />
-        ) : null}
-        {selectedDrawing ? (
-          <div className="context-bar" aria-label="Drawing">
-            <ToolButton label="Delete drawing" icon="trash" danger onClick={onRemoveHighlight} />
-          </div>
-        ) : null}
-        {signatureTool ? (
-          <div className="context-bar" aria-label="Signature placement">
-            {signaturePreview ? (
-              <img className="context-bar__signature" src={signaturePreview} alt="Current signature" />
-            ) : null}
-            <span className="context-bar__metric">Click a page to place</span>
-            <ToolButton label="New signature" icon="pen" labeled hasPopup="dialog" onClick={onNewSignature} />
-          </div>
-        ) : null}
-        {selectedSignature && !signatureTool ? (
-          <div className="context-bar" aria-label="Signature">
-            <span className="context-bar__metric">
-              {Math.round(selectedSignature.width)} × {Math.round(selectedSignature.height)}
-            </span>
-            <ToolButton label="Delete signature" icon="trash" danger onClick={onRemoveHighlight} />
-          </div>
-        ) : null}
-        <div className="tool-divider" aria-hidden="true" />
-        <div className="tool-group" aria-label="History">
-          <ToolButton
-            label="Undo"
-            icon="undo"
-            disabled={!canUndo}
-            shortcut="Control+Z Meta+Z"
-            onClick={onUndo}
-          />
-          <ToolButton
-            label="Redo"
-            icon="redo"
-            disabled={!canRedo}
-            shortcut="Control+Shift+Z Meta+Shift+Z Control+Y"
-            onClick={onRedo}
-          />
-        </div>
-      </div>
-      <div className="editor-toolbar__view">
-        <SearchControls disabled={!hasDocument} />
-        <div className="tool-group" aria-label="Zoom">
-          <ToolButton
-            label="Zoom out"
-            icon="zoomOut"
-            disabled={!hasDocument || scale <= MIN_PDF_SCALE}
-            onClick={onZoomOut}
-          />
-          <span className="zoom-value" aria-live="polite">
-            {zoomPercent}%
-          </span>
-          <ToolButton
-            label="Zoom in"
-            icon="zoomIn"
-            disabled={!hasDocument || scale >= MAX_PDF_SCALE}
-            onClick={onZoomIn}
-          />
-          <ToolButton
-            label="Fit width"
-            icon="fitWidth"
-            disabled={!hasDocument}
-            onClick={onFitWidth}
-            labeled
-          />
-          <ToolButton
-            label="Fit page"
-            icon="fitPage"
-            disabled={!hasDocument}
-            onClick={onFitPage}
-            labeled
-          />
-        </div>
-        <PageJump
-          currentPage={currentPage}
-          pageCount={pageCount}
-          disabled={!hasDocument}
-          onJumpToPage={onJumpToPage}
-        />
-      </div>
-    </div>
+      ) : null}
+    </>
   )
+}
+
+function Divider() {
+  return <span className="tool-divider" aria-hidden="true" />
 }
 
 function ToolButton({
   label,
+  hint,
   icon,
   pressed,
   disabled,
   danger,
-  labeled,
   shortcut,
   hasPopup,
   onClick,
   onMouseDown,
 }: {
   label: string
+  hint?: string
   icon: IconName
   pressed?: boolean
   disabled?: boolean
   danger?: boolean
-  labeled?: boolean
   shortcut?: string
   hasPopup?: 'dialog'
   onClick?: () => void
@@ -405,21 +458,85 @@ function ToolButton({
   return (
     <button
       type="button"
-      className={['tool', labeled ? 'tool--labeled' : '', danger ? 'tool--danger' : '']
-        .filter(Boolean)
-        .join(' ')}
+      className={danger ? 'tool tool--danger' : 'tool'}
       aria-label={label}
       aria-pressed={pressed}
       aria-keyshortcuts={shortcut}
       aria-haspopup={hasPopup}
-      data-tooltip={label}
+      data-tooltip={hint ? `${label}  ${hint}` : label}
       disabled={disabled}
       onClick={onClick}
       onMouseDown={onMouseDown}
     >
       <Icon name={icon} />
-      {labeled ? <span className="tool__text">{label}</span> : null}
     </button>
+  )
+}
+
+function PageMenu({
+  currentPage,
+  disabled,
+  canDeletePage,
+  canMovePageUp,
+  canMovePageDown,
+  onRotatePage,
+  onDuplicatePage,
+  onAddBlankPage,
+  onMovePageUp,
+  onMovePageDown,
+  onDeletePage,
+}: {
+  currentPage: number
+  disabled: boolean
+  canDeletePage: boolean
+  canMovePageUp: boolean
+  canMovePageDown: boolean
+  onRotatePage: () => void
+  onDuplicatePage: () => void
+  onAddBlankPage: () => void
+  onMovePageUp: () => void
+  onMovePageDown: () => void
+  onDeletePage: () => void
+}) {
+  return (
+    <Menu
+      label="Page actions"
+      trigger={(props) => (
+        <button
+          {...props}
+          type="button"
+          className="tool tool--menu"
+          disabled={disabled}
+          data-tooltip="Page actions"
+        >
+          <Icon name="page" />
+          <span className="tool__text">Page</span>
+          <Icon name="chevronDown" size={12} />
+        </button>
+      )}
+    >
+      <MenuHeading>Page {Math.max(currentPage, 1)}</MenuHeading>
+      <MenuItem icon="rotate" onSelect={onRotatePage}>
+        Rotate clockwise
+      </MenuItem>
+      <MenuItem icon="duplicate" onSelect={onDuplicatePage}>
+        Duplicate
+      </MenuItem>
+      <MenuItem icon="addPage" onSelect={onAddBlankPage}>
+        Insert blank page after
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem icon="moveUp" disabled={!canMovePageUp} onSelect={onMovePageUp}>
+        Move up
+      </MenuItem>
+      <MenuItem icon="moveDown" disabled={!canMovePageDown} onSelect={onMovePageDown}>
+        Move down
+      </MenuItem>
+      <MenuSeparator />
+      <MenuItem icon="trash" danger disabled={!canDeletePage} onSelect={onDeletePage}>
+        Delete page
+      </MenuItem>
+    </Menu>
   )
 }
 
@@ -435,46 +552,40 @@ function TextStyleControls({
   onDelete: () => void
 }) {
   return (
-    <div className="context-bar" aria-label="Text style" data-new-text-style="">
-      <label className="context-bar__label">
-        Font
-        <select
-          className="field-select"
-          value={selected.fontName}
-          aria-label="Font"
-          onChange={(event) => {
-            if (isNewTextFontName(event.target.value)) {
-              onChange({ fontName: event.target.value })
-            }
-          }}
-        >
-          {NEW_TEXT_FONTS.map((font) => (
-            <option key={font} value={font}>
-              {font}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="context-bar__label">
-        Size
-        <select
-          className="field-select"
-          value={String(selected.fontSize)}
-          aria-label="Font size"
-          onChange={(event) => {
-            const fontSize = Number(event.target.value)
-            if (Number.isFinite(fontSize)) {
-              onChange({ fontSize })
-            }
-          }}
-        >
-          {fontSizesFor(selected.fontSize).map((size) => (
-            <option key={size} value={size}>
-              {size}
-            </option>
-          ))}
-        </select>
-      </label>
+    <div className="context-bar" role="group" aria-label="Text style" data-new-text-style="">
+      <select
+        className="field-select field-select--font"
+        value={selected.fontName}
+        aria-label="Font"
+        onChange={(event) => {
+          if (isNewTextFontName(event.target.value)) {
+            onChange({ fontName: event.target.value })
+          }
+        }}
+      >
+        {NEW_TEXT_FONTS.map((font) => (
+          <option key={font} value={font}>
+            {font}
+          </option>
+        ))}
+      </select>
+      <select
+        className="field-select field-select--size"
+        value={String(selected.fontSize)}
+        aria-label="Font size"
+        onChange={(event) => {
+          const fontSize = Number(event.target.value)
+          if (Number.isFinite(fontSize)) {
+            onChange({ fontSize })
+          }
+        }}
+      >
+        {fontSizesFor(selected.fontSize).map((size) => (
+          <option key={size} value={size}>
+            {size}
+          </option>
+        ))}
+      </select>
       <ToolButton
         label="Bold"
         icon="bold"
@@ -491,10 +602,14 @@ function TextStyleControls({
           onChange({ italic: !selected.italic })
         }}
       />
-      <label className="context-bar__label">
-        Color
+      <label className="color-field" data-tooltip="Text color">
+        <span
+          className="color-field__chip"
+          style={{ background: rgbToHex(selected.color) }}
+          aria-hidden="true"
+        />
         <input
-          className="field-color"
+          className="color-field__input"
           type="color"
           aria-label="Text color"
           value={rgbToHex(selected.color)}
@@ -507,23 +622,6 @@ function TextStyleControls({
         />
       </label>
       <ToolButton label="Delete text" icon="trash" danger onClick={onDelete} />
-    </div>
-  )
-}
-
-function ImageControls({
-  size,
-  onDelete,
-}: {
-  size: { width: number; height: number }
-  onDelete: () => void
-}) {
-  return (
-    <div className="context-bar" aria-label="Image">
-      <span className="context-bar__metric">
-        {Math.round(size.width)} × {Math.round(size.height)}
-      </span>
-      <ToolButton label="Delete image" icon="trash" danger onClick={onDelete} />
     </div>
   )
 }
@@ -569,23 +667,26 @@ function PageJump({
         commit()
       }}
     >
-      <label htmlFor="page-jump">Page</label>
       <input
         id="page-jump"
         className="page-jump__input"
         inputMode="numeric"
-        aria-label="Page number"
+        aria-label={`Page number, ${pageCount} pages`}
         disabled={disabled}
         value={draft}
-        onFocus={() => {
+        size={Math.max(2, String(pageCount).length)}
+        onFocus={(event) => {
           setEditing(true)
+          event.currentTarget.select()
         }}
         onChange={(event) => {
           setDraft(event.target.value)
         }}
         onBlur={commit}
       />
-      <span>of {pageCount > 0 ? pageCount : '—'}</span>
+      <span className="page-jump__total" aria-hidden="true">
+        / {pageCount > 0 ? pageCount : '—'}
+      </span>
     </form>
   )
 }

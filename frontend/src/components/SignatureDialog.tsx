@@ -197,7 +197,7 @@ export function SignatureDialog({
   return (
     <dialog
       ref={dialogRef}
-      className="signature-dialog"
+      className="dialog signature-dialog"
       aria-labelledby="signature-dialog-title"
       aria-describedby="signature-dialog-hint"
       onCancel={(event) => {
@@ -208,54 +208,60 @@ export function SignatureDialog({
         event.stopPropagation()
       }}
     >
-      <div className="signature-dialog__panel">
-        <h2 id="signature-dialog-title" className="signature-dialog__title">
-          Create signature
-        </h2>
-        <p id="signature-dialog-hint" className="signature-dialog__hint">
-          Draw your signature
-        </p>
-        <div className="signature-dialog__pad">
-          <canvas
-            ref={canvasRef}
-            className="signature-dialog__canvas"
-            role="img"
-            aria-label="Signature drawing area"
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerEnd}
-            onPointerLeave={handlePointerEnd}
-          />
+      <div className="dialog__header">
+        <div>
+          <h2 id="signature-dialog-title" className="dialog__title">
+            Create signature
+          </h2>
+          <p id="signature-dialog-hint" className="dialog__text">
+            Draw with a mouse, trackpad or finger. It is kept for this session only.
+          </p>
         </div>
-        <div className="signature-dialog__actions">
-          <button
-            type="button"
-            className="button button--ghost"
-            aria-label="Clear signature"
-            onClick={() => {
-              update(clearSignaturePad(padRef.current))
-            }}
-          >
-            Clear
-          </button>
-          <button
-            ref={cancelButtonRef}
-            type="button"
-            className="button button--secondary signature-dialog__cancel"
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="button button--primary"
-            disabled={!hasInk}
-            onClick={handleConfirm}
-          >
-            Use signature
-          </button>
-        </div>
+      </div>
+      <div className="signature-dialog__pad" data-empty={hasInk ? undefined : 'true'}>
+        <canvas
+          ref={canvasRef}
+          className="signature-dialog__canvas"
+          role="img"
+          aria-label="Signature drawing area"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          onPointerLeave={handlePointerEnd}
+        />
+        <span className="signature-dialog__baseline" aria-hidden="true">
+          Sign here
+        </span>
+      </div>
+      <div className="dialog__footer">
+        <button
+          type="button"
+          className="button button--ghost dialog__footer-start"
+          aria-label="Clear signature"
+          disabled={!hasInk}
+          onClick={() => {
+            update(clearSignaturePad(padRef.current))
+          }}
+        >
+          Clear
+        </button>
+        <button
+          ref={cancelButtonRef}
+          type="button"
+          className="button button--secondary"
+          onClick={onCancel}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="button button--primary"
+          disabled={!hasInk}
+          onClick={handleConfirm}
+        >
+          Use signature
+        </button>
       </div>
     </dialog>
   )

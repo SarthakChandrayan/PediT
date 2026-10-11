@@ -1,5 +1,15 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
 import { Banner } from '../components/Banner.tsx'
+import { AppBrand } from '../components/EditorHeader.tsx'
+import { Icon } from '../components/icons.tsx'
 import { useAuth } from './useAuth.ts'
 
 type AuthView =
@@ -116,13 +126,14 @@ export function AuthScreen() {
     }
   }
 
+
   const title =
     view === 'sign-up'
-      ? 'Create your PeDit account'
+      ? 'Create your account'
       : view === 'verify-email'
-        ? 'Verify your email'
+        ? 'Check your email'
         : view === 'otp-sign-in'
-          ? 'Sign in with email code'
+          ? 'Sign in with a code'
           : view === 'forgot-password'
             ? 'Reset your password'
             : view === 'reset-password'
@@ -130,260 +141,475 @@ export function AuthScreen() {
               : 'Sign in to PeDit'
 
   const subtitle = !auth.configured
-    ? 'Sign-in is not configured. Set VITE_NEON_AUTH_URL and restart the app.'
-    : view === 'verify-email'
-      ? 'We sent a one-time code to confirm this email belongs to you.'
-      : view === 'otp-sign-in'
-        ? 'We’ll email you a one-time code. No password needed.'
-        : view === 'forgot-password'
-          ? 'Enter your account email and we’ll send a reset code.'
-          : view === 'reset-password'
-            ? 'Use the code from your inbox with a new password.'
-            : 'Your PDFs stay with the account that uploads them.'
+    ? null
+    : view === 'sign-up'
+      ? 'Upload, mark up and sign PDFs. Every save is kept as a version.'
+      : view === 'verify-email'
+        ? 'We sent a 6-digit code to confirm this address is yours.'
+        : view === 'otp-sign-in'
+          ? 'We’ll email you a one-time code — no password needed.'
+          : view === 'forgot-password'
+            ? 'Enter your account email and we’ll send a reset code.'
+            : view === 'reset-password'
+              ? 'Enter the code from your inbox and a new password.'
+              : 'Welcome back. Your documents are where you left them.'
+
+  const codeSent = info !== null || otp.length > 0
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <div className="app-header__brand">
-          <img className="app-header__logo" src="/mainlogo.png" alt="PeDit" />
+    <div className="auth">
+      <main className="auth__main">
+        <div className="auth__brand">
+          <AppBrand />
         </div>
-      </header>
-      <main className="workspace">
-        <div className="empty">
-          <div className="empty__panel auth-panel">
-            <img className="empty__logo" src="/logo.png" alt="" />
-            <h1>{title}</h1>
-            <p>{subtitle}</p>
-            {auth.error ? (
-              <Banner
-                className="auth-panel__error"
-                message={auth.error}
-                onDismiss={auth.clearError}
-              />
+        <div className="auth__form-wrap">
+          <div className="auth__form">
+            <h1 className="auth__title">{title}</h1>
+            {subtitle ? <p className="auth__subtitle">{subtitle}</p> : null}
+            {!auth.configured ? (
+              <p className="auth__info auth__info--warning" role="alert">
+                <Icon name="alert" size={14} />
+                Sign-in is not configured. Set VITE_NEON_AUTH_URL and restart the app.
+              </p>
             ) : null}
-            {info ? <p className="auth-panel__info">{info}</p> : null}
+            {auth.error ? (
+              <Banner className="auth__notice" message={auth.error} onDismiss={auth.clearError} />
+            ) : null}
+            {info ? (
+              <p className="auth__info" role="status">
+                <Icon name="mail" size={14} />
+                {info}
+              </p>
+            ) : null}
 
             {view === 'sign-in' || view === 'sign-up' ? (
               <>
                 <button
                   type="button"
-                  className="button button--secondary auth-panel__google"
+                  className="button button--secondary button--lg button--block"
                   disabled={busy}
                   onClick={() => {
                     void auth.signInWithGoogle()
                   }}
                 >
+                  <GoogleMark />
                   Continue with Google
                 </button>
-                <div className="auth-panel__divider" aria-hidden="true">
+                <div className="auth__divider" aria-hidden="true">
                   <span>or</span>
                 </div>
-                <form className="auth-panel__form" onSubmit={handlePasswordSubmit}>
-                  <label className="auth-panel__field">
-                    Email
-                    <input
-                      type="email"
-                      autoComplete="email"
-                      value={email}
-                      required
-                      disabled={busy}
-                      onChange={(event) => setEmail(event.target.value)}
-                    />
-                  </label>
-                  <label className="auth-panel__field">
-                    Password
-                    <input
-                      type="password"
-                      autoComplete={view === 'sign-up' ? 'new-password' : 'current-password'}
-                      value={password}
-                      required
-                      minLength={8}
-                      disabled={busy}
-                      onChange={(event) => setPassword(event.target.value)}
-                    />
-                  </label>
-                  <button type="submit" className="button button--primary auth-panel__submit" disabled={busy}>
-                    {auth.pending ? 'Please wait…' : view === 'sign-up' ? 'Create account' : 'Sign in'}
-                  </button>
+                <form className="auth__fields" onSubmit={handlePasswordSubmit}>
+                  <Field label="Email">
+                    <EmailInput value={email} disabled={busy} onChange={setEmail} />
+                  </Field>
+                  <PasswordField
+                    label="Password"
+                    value={password}
+                    disabled={busy}
+                    autoComplete={view === 'sign-up' ? 'new-password' : 'current-password'}
+                    hint={view === 'sign-up' ? 'At least 8 characters.' : undefined}
+                    action={
+                      view === 'sign-in' ? (
+                        <button
+                          type="button"
+                          className="link-button"
+                          disabled={auth.pending}
+                          onClick={() => switchView('forgot-password')}
+                        >
+                          Forgot password?
+                        </button>
+                      ) : null
+                    }
+                    onChange={setPassword}
+                  />
+                  <SubmitButton pending={auth.pending} disabled={busy}>
+                    {view === 'sign-up' ? 'Create account' : 'Sign in'}
+                  </SubmitButton>
                 </form>
                 {view === 'sign-in' ? (
-                  <div className="auth-panel__links">
-                    <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('forgot-password')}>
-                      Forgot password?
-                    </button>
-                    <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('otp-sign-in')}>
-                      Sign in with email code
-                    </button>
-                    <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-up')}>
-                      Need an account? Create one
-                    </button>
-                  </div>
-                ) : (
-                  <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-in')}>
-                    Already have an account? Sign in
+                  <button
+                    type="button"
+                    className="link-button auth__alt"
+                    disabled={auth.pending}
+                    onClick={() => switchView('otp-sign-in')}
+                  >
+                    Email me a sign-in code instead
                   </button>
-                )}
+                ) : null}
+                <p className="auth__switch">
+                  {view === 'sign-in' ? 'New to PeDit?' : 'Already have an account?'}{' '}
+                  <button
+                    type="button"
+                    className="link-button"
+                    disabled={auth.pending}
+                    onClick={() => switchView(view === 'sign-in' ? 'sign-up' : 'sign-in')}
+                  >
+                    {view === 'sign-in' ? 'Create an account' : 'Sign in'}
+                  </button>
+                </p>
               </>
             ) : null}
 
             {view === 'verify-email' ? (
-              <form className="auth-panel__form" onSubmit={handleVerifyEmail}>
-                <p className="auth-panel__muted">Code sent to {email.trim()}</p>
-                <OtpInput value={otp} onChange={setOtp} disabled={busy} />
-                <button type="submit" className="button button--primary auth-panel__submit" disabled={busy || otp.length < 6}>
-                  {auth.pending ? 'Please wait…' : 'Verify email'}
-                </button>
-                <button
-                  type="button"
-                  className="button button--ghost"
-                  disabled={busy || resendCooldown > 0}
-                  onClick={() => {
-                    void auth.resendVerificationOtp(email).then((sent) => {
-                      if (sent) {
-                        setInfo('A new code is on the way.')
-                        setResendCooldown(60)
-                      }
-                    })
-                  }}
-                >
-                  {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code'}
-                </button>
-                <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-in')}>
-                  Back to sign in
-                </button>
+              <form className="auth__fields" onSubmit={handleVerifyEmail}>
+                <div className="field">
+                  <span className="field__label">
+                    Code sent to <strong>{email.trim()}</strong>
+                  </span>
+                  <OtpInput value={otp} onChange={setOtp} disabled={busy} />
+                </div>
+                <SubmitButton pending={auth.pending} disabled={busy || otp.length < 6}>
+                  Verify email
+                </SubmitButton>
+                <div className="auth__row">
+                  <ResendButton
+                    cooldown={resendCooldown}
+                    disabled={busy}
+                    onResend={() => {
+                      void auth.resendVerificationOtp(email).then((sent) => {
+                        if (sent) {
+                          setInfo('A new code is on the way.')
+                          setResendCooldown(60)
+                        }
+                      })
+                    }}
+                  />
+                  <BackButton disabled={auth.pending} onBack={() => switchView('sign-in')} />
+                </div>
               </form>
             ) : null}
 
             {view === 'otp-sign-in' ? (
               <form
-                className="auth-panel__form"
-                onSubmit={info || otp.length > 0 ? handleConfirmSignInOtp : handleSendSignInOtp}
+                className="auth__fields"
+                onSubmit={codeSent ? handleConfirmSignInOtp : handleSendSignInOtp}
               >
-                <label className="auth-panel__field">
-                  Email
-                  <input
-                    type="email"
-                    autoComplete="email"
-                    value={email}
-                    required
-                    disabled={busy}
-                    onChange={(event) => setEmail(event.target.value)}
+                <Field label="Email">
+                  <EmailInput value={email} disabled={busy} onChange={setEmail} />
+                </Field>
+                {codeSent ? (
+                  <div className="field">
+                    <span className="field__label">6-digit code</span>
+                    <OtpInput value={otp} onChange={setOtp} disabled={busy} />
+                  </div>
+                ) : null}
+                <SubmitButton pending={auth.pending} disabled={busy || (codeSent && otp.length < 6)}>
+                  {codeSent ? 'Sign in' : 'Send code'}
+                </SubmitButton>
+                <div className="auth__row">
+                  {codeSent ? (
+                    <ResendButton
+                      cooldown={resendCooldown}
+                      disabled={busy}
+                      onResend={() => {
+                        void auth.sendSignInOtp(email).then((sent) => {
+                          if (sent) {
+                            setInfo(`Enter the 6-digit code sent to ${email.trim()}.`)
+                            setResendCooldown(60)
+                          }
+                        })
+                      }}
+                    />
+                  ) : (
+                    <span />
+                  )}
+                  <BackButton
+                    label="Use password instead"
+                    disabled={auth.pending}
+                    onBack={() => switchView('sign-in')}
                   />
-                </label>
-                {info || otp.length > 0 ? (
-                  <OtpInput value={otp} onChange={setOtp} disabled={busy} />
-                ) : null}
-                <button
-                  type="submit"
-                  className="button button--primary auth-panel__submit"
-                  disabled={busy || (!!(info || otp.length > 0) && otp.length < 6)}
-                >
-                  {auth.pending
-                    ? 'Please wait…'
-                    : info || otp.length > 0
-                      ? 'Sign in'
-                      : 'Send code'}
-                </button>
-                {info || otp.length > 0 ? (
-                  <button
-                    type="button"
-                    className="button button--ghost"
-                    disabled={busy || resendCooldown > 0}
-                    onClick={() => {
-                      void auth.sendSignInOtp(email).then((sent) => {
-                        if (sent) {
-                          setInfo(`Enter the 6-digit code sent to ${email.trim()}.`)
-                          setResendCooldown(60)
-                        }
-                      })
-                    }}
-                  >
-                    {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code'}
-                  </button>
-                ) : null}
-                <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-in')}>
-                  Back to password sign in
-                </button>
+                </div>
               </form>
             ) : null}
 
             {view === 'forgot-password' ? (
-              <form className="auth-panel__form" onSubmit={handleForgotPassword}>
-                <label className="auth-panel__field">
-                  Email
-                  <input
-                    type="email"
-                    autoComplete="email"
-                    value={email}
-                    required
-                    disabled={busy}
-                    onChange={(event) => setEmail(event.target.value)}
-                  />
-                </label>
-                <button type="submit" className="button button--primary auth-panel__submit" disabled={busy}>
-                  {auth.pending ? 'Please wait…' : 'Send reset code'}
-                </button>
-                <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-in')}>
-                  Back to sign in
-                </button>
+              <form className="auth__fields" onSubmit={handleForgotPassword}>
+                <Field label="Email">
+                  <EmailInput value={email} disabled={busy} onChange={setEmail} />
+                </Field>
+                <SubmitButton pending={auth.pending} disabled={busy}>
+                  Send reset code
+                </SubmitButton>
+                <div className="auth__row auth__row--end">
+                  <BackButton disabled={auth.pending} onBack={() => switchView('sign-in')} />
+                </div>
               </form>
             ) : null}
 
             {view === 'reset-password' ? (
-              <form className="auth-panel__form" onSubmit={handleResetPassword}>
-                <p className="auth-panel__muted">Resetting password for {email.trim()}</p>
-                <OtpInput value={otp} onChange={setOtp} disabled={busy} />
-                <label className="auth-panel__field">
-                  New password
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={password}
-                    required
-                    minLength={8}
+              <form className="auth__fields" onSubmit={handleResetPassword}>
+                <div className="field">
+                  <span className="field__label">
+                    Reset code for <strong>{email.trim()}</strong>
+                  </span>
+                  <OtpInput value={otp} onChange={setOtp} disabled={busy} />
+                </div>
+                <PasswordField
+                  label="New password"
+                  value={password}
+                  disabled={busy}
+                  autoComplete="new-password"
+                  hint="At least 8 characters."
+                  onChange={setPassword}
+                />
+                <PasswordField
+                  label="Confirm password"
+                  value={confirmPassword}
+                  disabled={busy}
+                  autoComplete="new-password"
+                  onChange={setConfirmPassword}
+                />
+                <SubmitButton pending={auth.pending} disabled={busy || otp.length < 6}>
+                  Update password
+                </SubmitButton>
+                <div className="auth__row">
+                  <ResendButton
+                    cooldown={resendCooldown}
                     disabled={busy}
-                    onChange={(event) => setPassword(event.target.value)}
+                    onResend={() => {
+                      void auth.requestPasswordReset(email).then((sent) => {
+                        if (sent) {
+                          setInfo('A new reset code is on the way.')
+                          setResendCooldown(60)
+                        }
+                      })
+                    }}
                   />
-                </label>
-                <label className="auth-panel__field">
-                  Confirm password
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={confirmPassword}
-                    required
-                    minLength={8}
-                    disabled={busy}
-                    onChange={(event) => setConfirmPassword(event.target.value)}
-                  />
-                </label>
-                <button type="submit" className="button button--primary auth-panel__submit" disabled={busy || otp.length < 6}>
-                  {auth.pending ? 'Please wait…' : 'Update password'}
-                </button>
-                <button
-                  type="button"
-                  className="button button--ghost"
-                  disabled={busy || resendCooldown > 0}
-                  onClick={() => {
-                    void auth.requestPasswordReset(email).then((sent) => {
-                      if (sent) {
-                        setInfo('A new reset code is on the way.')
-                        setResendCooldown(60)
-                      }
-                    })
-                  }}
-                >
-                  {resendCooldown > 0 ? `Resend code in ${resendCooldown}s` : 'Resend code'}
-                </button>
-                <button type="button" className="button button--ghost" disabled={auth.pending} onClick={() => switchView('sign-in')}>
-                  Back to sign in
-                </button>
+                  <BackButton disabled={auth.pending} onBack={() => switchView('sign-in')} />
+                </div>
               </form>
             ) : null}
           </div>
         </div>
       </main>
+      <AuthShowcase />
     </div>
+  )
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="field">
+      <span className="field__label">{label}</span>
+      {children}
+    </label>
+  )
+}
+
+function EmailInput({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: string
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  return (
+    <input
+      className="input"
+      type="email"
+      autoComplete="email"
+      spellCheck={false}
+      value={value}
+      required
+      disabled={disabled}
+      placeholder="you@example.com"
+      onChange={(event) => onChange(event.target.value)}
+    />
+  )
+}
+
+function PasswordField({
+  label,
+  value,
+  disabled,
+  autoComplete,
+  hint,
+  action,
+  onChange,
+}: {
+  label: string
+  value: string
+  disabled: boolean
+  autoComplete: string
+  hint?: string
+  action?: ReactNode
+  onChange: (value: string) => void
+}) {
+  const [visible, setVisible] = useState(false)
+  const id = useId()
+  return (
+    <div className="field">
+      <div className="field__label-row">
+        <label className="field__label" htmlFor={id}>
+          {label}
+        </label>
+        {action}
+      </div>
+      <div className="input-affix">
+        <input
+          id={id}
+          className="input"
+          type={visible ? 'text' : 'password'}
+          autoComplete={autoComplete}
+          value={value}
+          required
+          minLength={8}
+          disabled={disabled}
+          aria-describedby={hint ? `${id}-hint` : undefined}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <button
+          type="button"
+          className="input-affix__button"
+          aria-label={visible ? 'Hide password' : 'Show password'}
+          aria-pressed={visible}
+          disabled={disabled}
+          onClick={() => setVisible((current) => !current)}
+        >
+          <Icon name={visible ? 'eyeOff' : 'eye'} />
+        </button>
+      </div>
+      {hint ? (
+        <span id={`${id}-hint`} className="field__hint">
+          {hint}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+function SubmitButton({
+  pending,
+  disabled,
+  children,
+}: {
+  pending: boolean
+  disabled: boolean
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="submit"
+      className="button button--primary button--lg button--block"
+      disabled={disabled}
+      aria-busy={pending || undefined}
+    >
+      {pending ? (
+        <>
+          <span className="spinner spinner--sm spinner--inverse" aria-hidden="true" />
+          Please wait…
+        </>
+      ) : (
+        children
+      )}
+    </button>
+  )
+}
+
+function ResendButton({
+  cooldown,
+  disabled,
+  onResend,
+}: {
+  cooldown: number
+  disabled: boolean
+  onResend: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className="link-button"
+      disabled={disabled || cooldown > 0}
+      onClick={onResend}
+    >
+      {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend code'}
+    </button>
+  )
+}
+
+function BackButton({
+  label = 'Back to sign in',
+  disabled,
+  onBack,
+}: {
+  label?: string
+  disabled: boolean
+  onBack: () => void
+}) {
+  return (
+    <button
+      type="button"
+      className="link-button link-button--muted"
+      disabled={disabled}
+      onClick={onBack}
+    >
+      <Icon name="chevronLeft" size={14} />
+      {label}
+    </button>
+  )
+}
+
+function GoogleMark() {
+  return (
+    <svg className="icon" width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
+      <path
+        fill="#4285F4"
+        d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.7-1.57 2.68-3.88 2.68-6.62z"
+      />
+      <path
+        fill="#34A853"
+        d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.7H.96v2.33A9 9 0 0 0 9 18z"
+      />
+      <path
+        fill="#FBBC05"
+        d="M3.97 10.72A5.41 5.41 0 0 1 3.68 9c0-.6.1-1.18.29-1.72V4.95H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.05l3.01-2.33z"
+      />
+      <path
+        fill="#EA4335"
+        d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.95l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"
+      />
+    </svg>
+  )
+}
+
+/** A drawn page showing what the editor does: markup, a note and a signature. */
+function AuthShowcase() {
+  return (
+    <aside className="auth__showcase" aria-hidden="true">
+      <div className="showcase">
+        <div className="showcase__page">
+          <div className="showcase__head">
+            <span className="showcase__line showcase__line--title" />
+            <span className="showcase__meta">2 / 6</span>
+          </div>
+          <span className="showcase__line" style={{ width: '92%' }} />
+          <span className="showcase__line" style={{ width: '86%' }} />
+          <span className="showcase__line showcase__line--highlight" style={{ width: '74%' }} />
+          <span className="showcase__line" style={{ width: '89%' }} />
+          <span className="showcase__line" style={{ width: '58%' }} />
+          <span className="showcase__gap" />
+          <span className="showcase__line" style={{ width: '90%' }} />
+          <span className="showcase__line showcase__line--underline" style={{ width: '81%' }} />
+          <span className="showcase__line" style={{ width: '67%' }} />
+          <span className="showcase__note">Confirm clause 4.2 before Friday</span>
+          <div className="showcase__sign">
+            <svg viewBox="0 0 160 48" className="showcase__ink">
+              <path d="M6 34c10-18 18-24 21-16s-6 20 2 19 10-20 18-20 4 16 12 15 9-12 16-12 3 9 9 9c8 0 14-8 22-10 9-2 16 2 26-2" />
+            </svg>
+            <span className="showcase__sign-line" />
+            <span className="showcase__sign-label">Signature</span>
+          </div>
+        </div>
+      </div>
+      <ul className="showcase__points">
+        <li>Highlight, underline and add text</li>
+        <li>Draw, place images and sign in place</li>
+        <li>Rotate, reorder and duplicate pages</li>
+        <li>Every save is kept as a version</li>
+      </ul>
+    </aside>
   )
 }
 
@@ -434,14 +660,14 @@ function OtpInput({
   }
 
   return (
-    <div className="auth-panel__otp" role="group" aria-label="One-time code">
+    <div className="otp" role="group" aria-label="One-time code">
       {digits.map((digit, index) => (
         <input
           key={index}
           ref={(node) => {
             inputsRef.current[index] = node
           }}
-          className="auth-panel__otp-digit"
+          className="otp__digit"
           inputMode="numeric"
           autoComplete={index === 0 ? 'one-time-code' : 'off'}
           maxLength={1}

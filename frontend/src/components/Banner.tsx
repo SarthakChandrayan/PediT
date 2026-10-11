@@ -9,9 +9,16 @@ type BannerProps = {
   /** Omit to keep the banner until the user closes it. */
   autoDismissMs?: number
   className?: string
+  tone?: 'error' | 'info'
 }
 
-export function Banner({ message, onDismiss, autoDismissMs, className }: BannerProps) {
+export function Banner({
+  message,
+  onDismiss,
+  autoDismissMs,
+  className,
+  tone = 'error',
+}: BannerProps) {
   const onDismissRef = useRef(onDismiss)
   const [paused, setPaused] = useState(false)
 
@@ -32,12 +39,16 @@ export function Banner({ message, onDismiss, autoDismissMs, className }: BannerP
   return (
     <div
       className={className ? `banner ${className}` : 'banner'}
-      role="alert"
+      data-tone={tone}
+      role={tone === 'error' ? 'alert' : 'status'}
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
       onBlur={() => setPaused(false)}
     >
+      <span className="banner__icon" aria-hidden="true">
+        <Icon name={tone === 'error' ? 'alert' : 'check'} />
+      </span>
       <span className="banner__message">{message}</span>
       <button
         type="button"
@@ -46,7 +57,7 @@ export function Banner({ message, onDismiss, autoDismissMs, className }: BannerP
         title="Dismiss"
         onClick={() => onDismissRef.current()}
       >
-        <Icon name="close" />
+        <Icon name="close" size={14} />
       </button>
     </div>
   )
