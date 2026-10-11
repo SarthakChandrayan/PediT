@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { Banner } from '../components/Banner.tsx'
 import { AppBrand } from '../components/EditorHeader.tsx'
-import { Icon } from '../components/icons.tsx'
+import { BrandMark, Icon } from '../components/icons.tsx'
 import { useAuth } from './useAuth.ts'
 
 type AuthView =
@@ -578,10 +578,20 @@ function GoogleMark() {
 function AuthShowcase() {
   return (
     <aside className="auth__showcase" aria-hidden="true">
+      <div className="showcase__brand">
+        <BrandMark size={52} />
+        <div className="showcase__brand-text">
+          <span className="showcase__name">PeDit</span>
+          <span className="showcase__tagline">PDF editor</span>
+        </div>
+      </div>
       <div className="showcase">
         <div className="showcase__page">
           <div className="showcase__head">
-            <span className="showcase__line showcase__line--title" />
+            <span className="showcase__stamp">
+              <BrandMark size={16} />
+              <span className="showcase__line showcase__line--title" />
+            </span>
             <span className="showcase__meta">2 / 6</span>
           </div>
           <span className="showcase__line" style={{ width: '92%' }} />

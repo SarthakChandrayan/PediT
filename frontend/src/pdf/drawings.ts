@@ -19,15 +19,56 @@ export type DrawingAnnotation = {
   thickness: number
 }
 
+export type DrawingStyle = {
+  color: string
+  thickness: number
+}
+
 export type DrawingDraft = {
   pageNumber: number
   kind: DrawingKind
   points: PdfPoint[]
+  /** Omitted fields use the defaults below. */
+  color?: string
+  thickness?: number
 }
 
 export const DRAWING_COLOR = '#000000'
 export const DRAWING_OPACITY = 1
 export const DRAWING_THICKNESS = 2
+
+/** Ink colors offered by the drawing toolbar, in display order. */
+export const DRAWING_COLORS = [
+  { name: 'Black', value: '#000000' },
+  { name: 'Red', value: '#d0312d' },
+  { name: 'Blue', value: '#1f5bd8' },
+  { name: 'Green', value: '#1f8a4c' },
+  { name: 'Orange', value: '#e07a10' },
+] as const
+
+/** Stroke widths in PDF points offered by the drawing toolbar. */
+export const DRAWING_THICKNESSES = [1, 2, 4, 6] as const
+
+export const DEFAULT_DRAWING_STYLE: DrawingStyle = {
+  color: DRAWING_COLOR,
+  thickness: DRAWING_THICKNESS,
+}
+
+/** Keeps a style patch within the colors and widths the toolbar offers. */
+export function sanitizeDrawingStyle(
+  current: DrawingStyle,
+  patch: Partial<DrawingStyle>,
+): DrawingStyle {
+  const color =
+    patch.color !== undefined && /^#[0-9a-f]{6}$/i.test(patch.color)
+      ? patch.color.toLowerCase()
+      : current.color
+  const thickness =
+    patch.thickness !== undefined && Number.isFinite(patch.thickness) && patch.thickness > 0
+      ? Math.min(patch.thickness, 24)
+      : current.thickness
+  return { color, thickness }
+}
 
 /** Minimum distance between stored freehand samples, in PDF points. */
 const FREEHAND_SPACING = 1.5
@@ -64,9 +105,9 @@ export function finalizeDrawing(draft: DrawingDraft): DrawingAnnotation | null {
     pageNumber: draft.pageNumber,
     kind: draft.kind,
     points,
-    color: DRAWING_COLOR,
+    color: draft.color ?? DRAWING_COLOR,
     opacity: DRAWING_OPACITY,
-    thickness: DRAWING_THICKNESS,
+    thickness: draft.thickness ?? DRAWING_THICKNESS,
   }
 }
 

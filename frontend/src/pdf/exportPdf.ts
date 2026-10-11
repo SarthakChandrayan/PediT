@@ -30,7 +30,10 @@ import { resolveNewTextFont, type NewTextAnnotation } from './newTexts.ts'
 import { embedOriginalFont } from './originalFont.ts'
 import { pngDataUrlToBytes, type SignatureAnnotation } from './placedSignatures.ts'
 import { horizontalFitFactor, resolveStandardFont } from './textAppearance.ts'
-import type { TextEdit } from './textEdits.ts'
+import type { TextBlockLayout, TextEdit } from './textEdits.ts'
+import { BLOCK_WRAP_SLACK, wrapParagraphText } from './textBlocks.ts'
+import type { Region } from './contentStream.ts'
+import { removeOriginalText } from './textRemoval.ts'
 
 const TEXT_COLOR = rgb(0, 0, 0)
 const COVER_COLOR = rgb(1, 1, 1)
@@ -91,12 +94,11 @@ export async function exportDocumentSnapshot(snapshot: DocumentSnapshot): Promis
  * new text stays readable. Placed signatures come next, then created text,
  * matching the order of those overlays in the editor.
  *
- * The original text operators are left in the content stream. Removing them
- * would mean rewriting shared content streams, TJ arrays, and form XObjects,
- * which this exporter does not do. The white quadrilateral hides the old
- * glyphs when the page is painted. Text extraction can still return both the
- * original string and the replacement, because both sets of operators remain.
- * The cover is white because the background behind a run is not known.
+ * Edited text is removed from the page content first (see textRemoval.ts), so
+ * the old words cannot be selected, searched or copied. Glyphs it cannot
+ * measure, and text inside form XObjects, stay in the stream; the white
+ * quadrilateral still hides those when the page is painted. The cover is
+ * white because the background behind a run is not known.
  */
 export async function exportEditedPdf(
   originalBytes: ArrayBuffer,
@@ -120,6 +122,14 @@ export async function exportEditedPdf(
 
   const pdf = await PDFDocument.load(originalBytes.slice(0))
   const pages = pdf.getPages()
+
+  // Must run before anything is drawn: it rewrites each page's content.
+  pages.forEach((page, index) => {
+    const regions = edits
+      .filter((edit) => edit.pageNumber === index + 1)
+      .flatMap((edit) => coveredRegions(edit))
+    removeOriginalText(pdf, page, regions)
+  })
   const fonts = new Map<StandardFonts, PDFFont>()
   const originalFonts = new Map<string, PDFFont | null>()
 
@@ -173,7 +183,8 @@ export async function exportEditedPdf(
       originalFonts,
     )
     const standard = resolveStandardFont(edit.appearance)
-    let font = original
+    // Embedded fonts are usually subsets; new characters need a full font.
+    let font = original && (!edit.block || fontHasGlyphs(original, edit.editedText)) ? original : null
     if (!font) {
       font = fonts.get(standard) ?? null
       if (!font) {
@@ -181,12 +192,12 @@ export async function exportEditedPdf(
         fonts.set(standard, font)
       }
     }
-    applyTextEdit(
-      page,
-      font,
-      edit,
-      highlights.filter((markup) => markup.pageNumber === edit.pageNumber),
-    )
+    const pageMarkups = highlights.filter((markup) => markup.pageNumber === edit.pageNumber)
+    if (edit.block) {
+      applyBlockEdit(page, font, edit, edit.block, pageMarkups)
+    } else {
+      applyTextEdit(page, font, edit, pageMarkups)
+    }
   }
 
   const signatureImages = new Map<string, PDFImage>()
@@ -264,6 +275,117 @@ function applyTextEdit(
     color: editColor(edit),
   })
   page.pushOperators(popGraphicsState())
+}
+
+/**
+ * Replaces a paragraph: covers each original run, then re-wraps the edited
+ * text inside the paragraph's width with its original size and leading.
+ */
+function applyBlockEdit(
+  page: PDFPage,
+  font: PDFFont,
+  edit: TextEdit,
+  block: TextBlockLayout,
+  highlights: readonly TextMarkup[],
+): void {
+  for (const member of block.members) {
+    const placed = placeEdit({
+      ...edit,
+      pdfX: member.pdfX,
+      pdfY: member.pdfY,
+      width: member.width,
+      height: member.height,
+      transform: [...member.transform],
+      appearance: member.appearance ?? edit.appearance,
+      block: undefined,
+    })
+    coverOriginalText(page, placed)
+    paintMarkupsOver(page, highlights, boundsOf(placed.corners))
+  }
+
+  const fontSize = block.fontSize
+  if (!(fontSize > 0)) {
+    return
+  }
+  const scale =
+    edit.appearance?.horizontalScale && edit.appearance.horizontalScale > 0
+      ? edit.appearance.horizontalScale
+      : 1
+  const measure = (value: string) =>
+    font.widthOfTextAtSize(textForStandardFont(font, value), fontSize) * scale
+  const lines = wrapParagraphText(
+    edit.editedText,
+    block.width * BLOCK_WRAP_SLACK + 0.5,
+    block.indent,
+    measure,
+  )
+
+  page.pushOperators(
+    pushGraphicsState(),
+    setTextRenderingMode(TextRenderingMode.Fill),
+    setCharacterSpacing(0),
+    setWordSpacing(0),
+    setCharacterSqueeze(100 * scale),
+    setTextRise(0),
+  )
+  lines.forEach((line, index) => {
+    const text = textForStandardFont(font, line)
+    if (text.trim().length === 0) {
+      return
+    }
+    page.drawText(text, {
+      x: block.left + (index === 0 ? block.indent : 0),
+      y: block.firstBaseline - index * block.lineHeight,
+      size: fontSize,
+      font,
+      color: editColor(edit),
+    })
+  })
+  page.pushOperators(popGraphicsState())
+}
+
+/** Areas, in PDF user space, whose original glyphs an edit replaces. */
+function coveredRegions(edit: TextEdit): Region[] {
+  const placements = edit.block
+    ? edit.block.members.map((member) =>
+        placeEdit({
+          ...edit,
+          pdfX: member.pdfX,
+          pdfY: member.pdfY,
+          width: member.width,
+          height: member.height,
+          transform: [...member.transform],
+          appearance: member.appearance ?? edit.appearance,
+          block: undefined,
+        }),
+      )
+    : [placeEdit(edit)]
+  return placements.map((placed) => {
+    const bounds = boundsOf(placed.corners)
+    return {
+      x0: bounds.x - 0.5,
+      y0: bounds.y - 0.5,
+      x1: bounds.x + bounds.width + 0.5,
+      y1: bounds.y + bounds.height + 0.5,
+    }
+  })
+}
+
+/** True when an embedded (often subset) font has a glyph for every character. */
+function fontHasGlyphs(font: PDFFont, text: string): boolean {
+  const program = (font as unknown as {
+    embedder?: { font?: { hasGlyphForCodePoint?: (codePoint: number) => boolean } }
+  }).embedder?.font
+  if (!program?.hasGlyphForCodePoint) {
+    return true
+  }
+  for (const char of text) {
+    const codePoint = char.codePointAt(0)
+    if (codePoint !== undefined && !/\s/.test(char) && !program.hasGlyphForCodePoint(codePoint)) {
+      return false
+    }
+  }
+  return true
 }
 
 function paintCreatedText(page: PDFPage, font: PDFFont, created: NewTextAnnotation): void {

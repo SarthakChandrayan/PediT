@@ -1,7 +1,12 @@
 import { useState, type MouseEvent } from 'react'
 import { parsePageJump } from '../pdf/pageNavigation.ts'
 import { SearchControls } from './SearchControls.tsx'
-import type { DrawingKind } from '../pdf/drawings.ts'
+import {
+  DRAWING_COLORS,
+  DRAWING_THICKNESSES,
+  type DrawingKind,
+  type DrawingStyle,
+} from '../pdf/drawings.ts'
 import {
   hexToRgb,
   isNewTextFontName,
@@ -58,6 +63,8 @@ type ToolbarProps = {
   selectedNewText: Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'> | null
   selectedImage: { width: number; height: number } | null
   selectedDrawing: boolean
+  drawingStyle: DrawingStyle
+  onDrawingStyle: (patch: Partial<DrawingStyle>) => void
   hasSignature: boolean
   signatureTool: boolean
   signaturePreview: string | null
@@ -79,11 +86,11 @@ const SHIFT = IS_APPLE ? '⇧' : 'Shift+'
 
 
 const DRAW_TOOLS = [
-  ['freehand', 'Pen', 'pen'],
-  ['line', 'Line', 'line'],
-  ['arrow', 'Arrow', 'arrow'],
-  ['rectangle', 'Rectangle', 'rectangle'],
-  ['ellipse', 'Ellipse', 'ellipse'],
+  ['freehand', 'Pen', 'pen', 'P'],
+  ['line', 'Line', 'line', 'L'],
+  ['arrow', 'Arrow', 'arrow', 'A'],
+  ['rectangle', 'Rectangle', 'rectangle', 'R'],
+  ['ellipse', 'Ellipse', 'ellipse', 'O'],
 ] as const
 
 const SWATCH_LABELS: Record<HighlightColorName, string> = {
@@ -134,6 +141,8 @@ export function Toolbar({
   selectedNewText,
   selectedImage,
   selectedDrawing,
+  drawingStyle,
+  onDrawingStyle,
   hasSignature,
   signatureTool,
   signaturePreview,
@@ -161,6 +170,7 @@ export function Toolbar({
     selectedNewText !== null ||
     selectedImage !== null ||
     selectedDrawing ||
+    drawingTool !== null ||
     signatureTool ||
     selectedSignature !== null
 
@@ -200,6 +210,8 @@ export function Toolbar({
           <div className="tool-group" role="group" aria-label="Mode">
             <ToolButton
               label="Select"
+              hint="V"
+              shortcut="V"
               icon="select"
               pressed={hasDocument && selectActive}
               disabled={!hasDocument}
@@ -207,6 +219,8 @@ export function Toolbar({
             />
             <ToolButton
               label="Add text"
+              hint="T"
+              shortcut="T"
               icon="addText"
               pressed={textTool}
               disabled={pageOpsDisabled}
@@ -269,10 +283,12 @@ export function Toolbar({
           </div>
           <Divider />
           <div className="tool-group" role="group" aria-label="Draw">
-            {DRAW_TOOLS.map(([kind, label, icon]) => (
+            {DRAW_TOOLS.map(([kind, label, icon, key]) => (
               <ToolButton
                 key={kind}
                 label={label}
+                hint={key}
+                shortcut={key}
                 icon={icon}
                 pressed={drawingTool === kind}
                 disabled={pageOpsDisabled}
@@ -391,11 +407,13 @@ export function Toolbar({
               <ToolButton label="Delete image" icon="trash" danger onClick={onRemoveHighlight} />
             </div>
           ) : null}
-          {selectedDrawing ? (
-            <div className="context-bar" aria-label="Selected drawing" role="group">
-              <span className="context-bar__title">Drawing</span>
-              <ToolButton label="Delete drawing" icon="trash" danger onClick={onRemoveHighlight} />
-            </div>
+          {selectedDrawing || drawingTool ? (
+            <DrawingStyleControls
+              style={drawingStyle}
+              selected={selectedDrawing}
+              onChange={onDrawingStyle}
+              onDelete={onRemoveHighlight}
+            />
           ) : null}
           {signatureTool ? (
             <div className="context-bar" aria-label="Signature placement" role="group">
@@ -470,6 +488,76 @@ function ToolButton({
     >
       <Icon name={icon} />
     </button>
+  )
+}
+
+function DrawingStyleControls({
+  style,
+  selected,
+  onChange,
+  onDelete,
+}: {
+  style: DrawingStyle
+  selected: boolean
+  onChange: (patch: Partial<DrawingStyle>) => void
+  onDelete: () => void
+}) {
+  return (
+    <div className="context-bar" role="group" aria-label={selected ? 'Selected drawing' : 'Drawing style'}>
+      <span className="context-bar__title">{selected ? 'Drawing' : 'Ink'}</span>
+      <div className="swatches" role="radiogroup" aria-label="Ink color">
+        {DRAWING_COLORS.map((color) => (
+          <button
+            key={color.value}
+            type="button"
+            role="radio"
+            className="swatch"
+            style={{ background: color.value }}
+            aria-checked={style.color.toLowerCase() === color.value}
+            aria-label={`${color.name} ink`}
+            data-tooltip={color.name}
+            onClick={() => {
+              onChange({ color: color.value })
+            }}
+          />
+        ))}
+      </div>
+      <span className="tool-divider" aria-hidden="true" />
+      <div className="tool-group" role="radiogroup" aria-label="Line thickness">
+        {DRAWING_THICKNESSES.map((thickness) => (
+          <button
+            key={thickness}
+            type="button"
+            role="radio"
+            className="tool weight"
+            aria-checked={style.thickness === thickness}
+            aria-label={`${thickness} pt line`}
+            data-tooltip={`${thickness} pt`}
+            onClick={() => {
+              onChange({ thickness })
+            }}
+          >
+            <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
+              <line
+                x1="4"
+                y1="10"
+                x2="16"
+                y2="10"
+                stroke="currentColor"
+                strokeWidth={Math.min(thickness, 6) * 0.9 + 0.6}
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+        ))}
+      </div>
+      {selected ? (
+        <>
+          <span className="tool-divider" aria-hidden="true" />
+          <ToolButton label="Delete drawing" hint="Del" icon="trash" danger onClick={onDelete} />
+        </>
+      ) : null}
+    </div>
   )
 }
 

@@ -25,6 +25,31 @@ export type TextRunAppearance = {
   vertical: boolean
 }
 
+/** One original text run covered by a paragraph edit. PDF user space. */
+export type TextBlockMember = {
+  pdfX: number
+  pdfY: number
+  width: number
+  height: number
+  transform: readonly number[]
+  appearance?: TextRunAppearance
+}
+
+/**
+ * Paragraph geometry for an edit that spans several runs. The edited text
+ * is re-wrapped to `width`, one line every `lineHeight`, starting at
+ * `firstBaseline`; every member run is covered first. Treat as immutable.
+ */
+export type TextBlockLayout = {
+  left: number
+  width: number
+  firstBaseline: number
+  lineHeight: number
+  fontSize: number
+  indent: number
+  members: readonly TextBlockMember[]
+}
+
 /**
  * A committed change to one existing PDF text run.
  *
@@ -44,6 +69,8 @@ export type TextEdit = {
   /** Original PDF font name when it could be read. Not a screen font. */
   fontName?: string
   appearance?: TextRunAppearance
+  /** Present when the edit replaces a whole paragraph rather than one run. */
+  block?: TextBlockLayout
 }
 
 export type TextEditSource = {
@@ -57,6 +84,7 @@ export type TextEditSource = {
   transform: readonly number[]
   fontName?: string
   appearance?: TextRunAppearance
+  block?: TextBlockLayout
 }
 
 export type ActiveTextEdit = TextEditSource & {
@@ -133,6 +161,7 @@ export function commitTextEdit(state: EditorState): EditorState {
             transform: [...active.transform],
             fontName: active.fontName,
             appearance: copyAppearance(active.appearance),
+            block: active.block,
           },
         ]
 

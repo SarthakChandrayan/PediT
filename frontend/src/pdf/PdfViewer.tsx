@@ -31,10 +31,13 @@ import {
 import type { Signature } from './signatures.ts'
 import {
   appendDrawingPoint,
+  DEFAULT_DRAWING_STYLE,
   finalizeDrawing,
+  sanitizeDrawingStyle,
   type DrawingAnnotation,
   type DrawingDraft,
   type DrawingKind,
+  type DrawingStyle,
 } from './drawings.ts'
 import { HighlightContext, type HighlightApi } from './HighlightContext.tsx'
 import {
@@ -80,6 +83,7 @@ import {
   type NewTextBox,
 } from './newTexts.ts'
 import { usePdfDocument } from './usePdfDocument.ts'
+import { MAX_PDF_SCALE, MIN_PDF_SCALE } from './scale.ts'
 
 /** Space left above a page scrolled into view, so it never sits flush under the toolbar. */
 const PAGE_SCROLL_MARGIN = 20
@@ -111,6 +115,8 @@ export type AnnotationUiState = {
   selectedNewText: NewTextStyleState | null
   selectedImage: { width: number; height: number } | null
   selectedDrawing: boolean
+  /** Style of the selected drawing, or the style the next stroke will use. */
+  drawingStyle: DrawingStyle
   /** True while clicking a page places the reusable signature. */
   signatureTool: boolean
   selectedSignature: { width: number; height: number } | null
@@ -165,6 +171,8 @@ export type PdfViewerHandle = {
   patchSelectedNewText: (
     patch: Partial<Pick<NewTextAnnotation, 'fontName' | 'fontSize' | 'bold' | 'italic' | 'color'>>,
   ) => void
+  /** Sets the style for new strokes and restyles the selected drawing, if any. */
+  setDrawingStyle: (patch: Partial<DrawingStyle>) => void
   /** Inserted images in PDF user space. The PDF bytes are unchanged. */
   getImages: () => readonly ImageAnnotation[]
   /** Viewer zoom that fits the current page. Does not change the PDF or history. */
@@ -203,6 +211,17 @@ type PdfViewerProps = {
   onCurrentPageChange?: (pageNumber: number) => void
   onTextEditsChange?: (edits: readonly TextEdit[]) => void
   onAnnotationStateChange?: (state: AnnotationUiState) => void
+  /** Ctrl+wheel or trackpad pinch over the pages asks for this scale. */
+  onZoomRequest?: (scale: number) => void
+}
+
+/** Where the pointer was, as a fraction of the scrollable content, when zoom began. */
+type ZoomAnchor = {
+  fractionX: number
+  fractionY: number
+  pointerX: number
+  pointerY: number
+  until: number
 }
 
 export function PdfViewer({
@@ -215,6 +234,7 @@ export function PdfViewer({
   onCurrentPageChange,
   onTextEditsChange,
   onAnnotationStateChange,
+  onZoomRequest,
 }: PdfViewerProps) {
   const history = useDocumentHistory()
   const search = useSearch()
@@ -222,6 +242,14 @@ export function PdfViewer({
   const view = history.view
   const pdf = usePdfDocument(data)
   const scrollerRef = useRef<HTMLDivElement>(null)
+  const pagesContainerRef = useRef<HTMLDivElement>(null)
+  const zoomAnchorRef = useRef<ZoomAnchor | null>(null)
+  const scaleRef = useRef(scale)
+  const onZoomRequestRef = useRef(onZoomRequest)
+  useEffect(() => {
+    scaleRef.current = scale
+    onZoomRequestRef.current = onZoomRequest
+  })
   const pagesRef = useRef<Map<number, PageGeometry>>(new Map())
   const onPageCountChangeRef = useRef(onPageCountChange)
   const onCurrentPageChangeRef = useRef(onCurrentPageChange)
@@ -235,6 +263,8 @@ export function PdfViewer({
   const [canHighlight, setCanHighlight] = useState(false)
   const [drawingTool, setDrawingToolState] = useState<DrawingKind | null>(null)
   const [draft, setDraft] = useState<DrawingDraft | null>(null)
+  const [drawingStyle, setDrawingStyleState] = useState<DrawingStyle>(DEFAULT_DRAWING_STYLE)
+  const drawingStyleRef = useRef<DrawingStyle>(DEFAULT_DRAWING_STYLE)
   const [textTool, setTextToolState] = useState(false)
   const [signatureTool, setSignatureToolState] = useState<Signature | null>(null)
   const [textDraft, setTextDraft] = useState<NewTextAnnotation | null>(null)
@@ -403,6 +433,7 @@ export function PdfViewer({
       insertedImages.find((item) => item.id === selectedImageId) ?? null
     const selectedSignature =
       placedSignatures.find((item) => item.id === selectedSignatureId) ?? null
+    const selectedDrawing = drawings.find((item) => item.id === selectedDrawingId) ?? null
     onAnnotationStateChangeRef.current?.({
       canHighlight,
       canRemoveHighlight:
@@ -426,6 +457,9 @@ export function PdfViewer({
         ? { width: selectedImage.width, height: selectedImage.height }
         : null,
       selectedDrawing: selectedDrawingId !== null,
+      drawingStyle: selectedDrawing
+        ? { color: selectedDrawing.color, thickness: selectedDrawing.thickness }
+        : drawingStyle,
       signatureTool: shownSignatureTool !== null,
       selectedSignature: selectedSignature
         ? { width: selectedSignature.width, height: selectedSignature.height }
@@ -438,6 +472,8 @@ export function PdfViewer({
   }, [
     canHighlight,
     createdTexts,
+    drawings,
+    drawingStyle,
     insertedImages,
     placedSignatures,
     selectedDrawingId,
@@ -827,7 +863,8 @@ export function PdfViewer({
   }, [])
 
   const beginStroke = useCallback((pageNumber: number, kind: DrawingKind, point: PdfPoint) => {
-    const next = { pageNumber, kind, points: [point] }
+    const { color, thickness } = drawingStyleRef.current
+    const next = { pageNumber, kind, points: [point], color, thickness }
     draftRef.current = next
     setDraft(next)
     selectHighlight(null)
@@ -1014,6 +1051,63 @@ export function PdfViewer({
     [highlights, registerRuns, selectHighlight, selectedHighlightId],
   )
 
+  /** Removes whatever annotation is selected. Returns false when nothing was. */
+  const removeSelection = useCallback((): boolean => {
+    const viewNow = historyRef.current.getView()
+    const draftText = textDraftRef.current
+    if (draftText && (viewNow.selectedTextId === draftText.id || !viewNow.selectedTextId)) {
+      cancelNewTextDraft()
+      return true
+    }
+    const textId = viewNow.selectedTextId
+    if (textId) {
+      cancelNewTextEdit()
+      historyRef.current.commit((snapshot) => ({
+        ...snapshot,
+        texts: snapshot.texts.filter((item) => item.id !== textId),
+        selectedTextId: null,
+      }))
+      return true
+    }
+    const signatureId = viewNow.selectedSignatureId
+    if (signatureId) {
+      historyRef.current.commit((snapshot) => withoutSignature(snapshot, signatureId))
+      return true
+    }
+    const imageId = viewNow.selectedImageId
+    if (imageId) {
+      historyRef.current.commit((snapshot) => ({
+        ...snapshot,
+        images: snapshot.images.filter((image) => image.id !== imageId),
+        selectedImageId: null,
+      }))
+      return true
+    }
+    const drawingId = viewNow.selectedDrawingId
+    if (drawingId) {
+      historyRef.current.commit((snapshot) => ({
+        ...snapshot,
+        drawings: snapshot.drawings.filter((item) => item.id !== drawingId),
+        selectedDrawingId: null,
+      }))
+      return true
+    }
+    const id = viewNow.selectedMarkupId
+    if (!id) {
+      return false
+    }
+    historyRef.current.commit((snapshot) => ({
+      ...snapshot,
+      markups: snapshot.markups.filter((markup) => markup.id !== id),
+      selectedMarkupId: null,
+    }))
+    return true
+  }, [cancelNewTextDraft, cancelNewTextEdit])
+  const removeSelectionRef = useRef(removeSelection)
+  useEffect(() => {
+    removeSelectionRef.current = removeSelection
+  })
+
   useImperativeHandle(
     ref,
     () => {
@@ -1119,54 +1213,7 @@ export function PdfViewer({
         addMarkups(lineMarkupsFromPieces(readSelectionPieces(), 'strikethrough'))
       },
       removeSelectedHighlight() {
-        const viewNow = historyRef.current.getView()
-        const draftText = textDraftRef.current
-        if (draftText && (viewNow.selectedTextId === draftText.id || !viewNow.selectedTextId)) {
-          cancelNewTextDraft()
-          return
-        }
-        const textId = viewNow.selectedTextId
-        if (textId) {
-          cancelNewTextEdit()
-          historyRef.current.commit((snapshot) => ({
-            ...snapshot,
-            texts: snapshot.texts.filter((item) => item.id !== textId),
-            selectedTextId: null,
-          }))
-          return
-        }
-        const signatureId = viewNow.selectedSignatureId
-        if (signatureId) {
-          historyRef.current.commit((snapshot) => withoutSignature(snapshot, signatureId))
-          return
-        }
-        const imageId = viewNow.selectedImageId
-        if (imageId) {
-          historyRef.current.commit((snapshot) => ({
-            ...snapshot,
-            images: snapshot.images.filter((image) => image.id !== imageId),
-            selectedImageId: null,
-          }))
-          return
-        }
-        const drawingId = viewNow.selectedDrawingId
-        if (drawingId) {
-          historyRef.current.commit((snapshot) => ({
-            ...snapshot,
-            drawings: snapshot.drawings.filter((item) => item.id !== drawingId),
-            selectedDrawingId: null,
-          }))
-          return
-        }
-        const id = viewNow.selectedMarkupId
-        if (!id) {
-          return
-        }
-        historyRef.current.commit((snapshot) => ({
-          ...snapshot,
-          markups: snapshot.markups.filter((markup) => markup.id !== id),
-          selectedMarkupId: null,
-        }))
+        removeSelection()
       },
       getDrawings() {
         return historyRef.current.getView().drawings
@@ -1218,6 +1265,26 @@ export function PdfViewer({
           ...snapshot,
           texts: snapshot.texts.map((item) =>
             item.id === id ? patchNewTextStyle(item, patch) : item,
+          ),
+        }))
+      },
+      setDrawingStyle(patch) {
+        const next = sanitizeDrawingStyle(drawingStyleRef.current, patch)
+        drawingStyleRef.current = next
+        setDrawingStyleState(next)
+        const viewNow = historyRef.current.getView()
+        const selected = viewNow.drawings.find((item) => item.id === viewNow.selectedDrawingId)
+        if (!selected) {
+          return
+        }
+        const style = sanitizeDrawingStyle(selected, patch)
+        if (style.color === selected.color && style.thickness === selected.thickness) {
+          return
+        }
+        historyRef.current.commit((snapshot) => ({
+          ...snapshot,
+          drawings: snapshot.drawings.map((item) =>
+            item.id === selected.id ? { ...item, ...style } : item,
           ),
         }))
       },
@@ -1304,6 +1371,7 @@ export function PdfViewer({
       commitEdit,
       commitNewTextDraft,
       commitNewTextEdit,
+      removeSelection,
     ],
   )
 
@@ -1368,6 +1436,70 @@ export function PdfViewer({
     return () => observer.disconnect()
   }, [pdf.document, scale])
 
+  useEffect(() => {
+    const root = scrollerRef.current
+    if (!root) {
+      return
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey && !event.metaKey) {
+        return
+      }
+      const request = onZoomRequestRef.current
+      if (!request) {
+        return
+      }
+      // Zoom the pages, not the whole app.
+      event.preventDefault()
+      const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY
+      const base = scaleRef.current
+      const next = clampScale(Math.round(base * Math.exp(-delta * 0.0025) * 100) / 100)
+      if (next === base) {
+        return
+      }
+      const box = root.getBoundingClientRect()
+      const pointerX = event.clientX - box.left
+      const pointerY = event.clientY - box.top
+      zoomAnchorRef.current = {
+        fractionX: (root.scrollLeft + pointerX) / Math.max(root.scrollWidth, 1),
+        fractionY: (root.scrollTop + pointerY) / Math.max(root.scrollHeight, 1),
+        pointerX,
+        pointerY,
+        until: performance.now() + 400,
+      }
+      scaleRef.current = next
+      request(next)
+    }
+    root.addEventListener('wheel', onWheel, { passive: false })
+    return () => {
+      root.removeEventListener('wheel', onWheel)
+    }
+  }, [])
+
+  useEffect(() => {
+    const root = scrollerRef.current
+    const pages = pagesContainerRef.current
+    if (!root || !pages) {
+      return
+    }
+    // Pages resize asynchronously after a scale change; keep the point that
+    // was under the pointer in place while they settle.
+    const observer = new ResizeObserver(() => {
+      const anchor = zoomAnchorRef.current
+      if (!anchor) {
+        return
+      }
+      if (performance.now() > anchor.until) {
+        zoomAnchorRef.current = null
+        return
+      }
+      root.scrollLeft = anchor.fractionX * root.scrollWidth - anchor.pointerX
+      root.scrollTop = anchor.fractionY * root.scrollHeight - anchor.pointerY
+    })
+    observer.observe(pages)
+    return () => observer.disconnect()
+  }, [pdf.document])
+
   const pdfDocument = pdf.document
 
   const jumpToPage = useCallback((pageNumber: number) => {
@@ -1415,29 +1547,25 @@ export function PdfViewer({
       if (event.key !== 'Delete' && event.key !== 'Backspace') {
         return
       }
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) {
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        return
+      }
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement &&
+          (target.isContentEditable || target.closest('[role="menu"],dialog') !== null))
+      ) {
         return
       }
       if (textDraftRef.current || newTextEditRef.current) {
         return
       }
-      const viewNow = historyRef.current.getView()
-      const signatureId = viewNow.selectedSignatureId
-      if (signatureId) {
+      if (removeSelectionRef.current()) {
         event.preventDefault()
-        historyRef.current.commit((snapshot) => withoutSignature(snapshot, signatureId))
-        return
       }
-      const id = viewNow.selectedTextId
-      if (!id) {
-        return
-      }
-      event.preventDefault()
-      historyRef.current.commit((snapshot) => ({
-        ...snapshot,
-        texts: snapshot.texts.filter((item) => item.id !== id),
-        selectedTextId: null,
-      }))
     }
     window.addEventListener('keydown', onKeyDown)
     return () => {
@@ -1514,7 +1642,7 @@ export function PdfViewer({
       ) : null}
 
       {pdfDocument ? (
-        <div className="pdf-viewer__pages">
+        <div ref={pagesContainerRef} className="pdf-viewer__pages">
           {Array.from({ length: pdfDocument.numPages }, (_, index) => {
             const pageNumber = index + 1
             return (
@@ -1539,6 +1667,10 @@ export function PdfViewer({
       </HighlightContext.Provider>
     </TextEditorContext.Provider>
   )
+}
+
+function clampScale(value: number): number {
+  return Math.min(MAX_PDF_SCALE, Math.max(MIN_PDF_SCALE, value))
 }
 
 function pageFrame(

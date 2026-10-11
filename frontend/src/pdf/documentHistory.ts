@@ -494,12 +494,31 @@ function sameEdits(left: readonly TextEdit[], right: readonly TextEdit[]): boole
       a.height !== b.height ||
       a.fontName !== b.fontName ||
       !sameNumbers(a.transform, b.transform) ||
-      !sameAppearance(a.appearance, b.appearance)
+      !sameAppearance(a.appearance, b.appearance) ||
+      !sameBlock(a.block, b.block)
     ) {
       return false
     }
   }
   return true
+}
+
+function sameBlock(left: TextEdit['block'], right: TextEdit['block']): boolean {
+  if (left === right) {
+    return true
+  }
+  if (!left || !right) {
+    return false
+  }
+  return (
+    left.left === right.left &&
+    left.width === right.width &&
+    left.firstBaseline === right.firstBaseline &&
+    left.lineHeight === right.lineHeight &&
+    left.fontSize === right.fontSize &&
+    left.indent === right.indent &&
+    left.members.length === right.members.length
+  )
 }
 
 function sameAppearance(

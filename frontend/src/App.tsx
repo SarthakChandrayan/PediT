@@ -29,7 +29,7 @@ import {
   withPageOperation,
   type DocumentSnapshot,
 } from './pdf/documentHistory.ts'
-import { type DrawingKind } from './pdf/drawings.ts'
+import { DEFAULT_DRAWING_STYLE, type DrawingKind } from './pdf/drawings.ts'
 import { loadLocalImage } from './pdf/images.ts'
 import { exportDocumentSnapshot } from './pdf/exportPdf.ts'
 import {
@@ -136,20 +136,10 @@ function Editor({
   const [highlightColor, setHighlightColor] = useState<HighlightColorName>(
     DEFAULT_HIGHLIGHT_COLOR,
   )
-  const [annotationUi, setAnnotationUi] = useState<AnnotationUiState>({
-    canHighlight: false,
-    canRemoveHighlight: false,
-    drawingTool: null,
-    textTool: false,
-    selectedNewText: null,
-    selectedImage: null,
-    selectedDrawing: false,
-    signatureTool: false,
-    selectedSignature: null,
-    hasUncommittedEdit: false,
-  })
+  const [annotationUi, setAnnotationUi] = useState<AnnotationUiState>(INITIAL_ANNOTATION_UI)
   const historyDirtyRef = useRef(history.isDirty)
   const saveShortcutRef = useRef<(() => void) | null>(null)
+  const editorKeyRef = useRef<((event: KeyboardEvent) => boolean) | null>(null)
   const [restoring, setRestoring] = useState(() => readStoredDocument() !== null)
 
   // Window listeners read the latest history and save handlers through refs.
@@ -158,6 +148,7 @@ function Editor({
     undoRef.current = history.undo
     redoRef.current = history.redo
     historyDirtyRef.current = history.isDirty
+    editorKeyRef.current = fileName ? handleEditorKey : null
     saveShortcutRef.current = fileName
       ? () => {
           void handleSave()
@@ -269,6 +260,92 @@ function Editor({
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [])
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isTypingTarget(event.target)) {
+        return
+      }
+      if (document.querySelector('dialog[open]')) {
+        return
+      }
+      if (editorKeyRef.current?.(event)) {
+        event.preventDefault()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [])
+
+  function selectTool() {
+    const tool = annotationUi.drawingTool
+    if (tool) {
+      viewerRef.current?.setDrawingTool(tool)
+    }
+    if (annotationUi.textTool) {
+      viewerRef.current?.setTextTool(false)
+    }
+    if (annotationUi.signatureTool) {
+      viewerRef.current?.stopSignaturePlacement()
+    }
+  }
+
+  /** Single-key tool shortcuts and Ctrl/⌘ zoom keys. Returns true when handled. */
+  function handleEditorKey(event: KeyboardEvent): boolean {
+    if (pageCount < 1) {
+      return false
+    }
+    const meta = event.ctrlKey || event.metaKey
+    if (meta && !event.altKey) {
+      if (event.key === '=' || event.key === '+') {
+        setScale((current) => stepPdfScale(current, 1))
+        return true
+      }
+      if (event.key === '-') {
+        setScale((current) => stepPdfScale(current, -1))
+        return true
+      }
+      if (event.key === '0') {
+        setScale(DEFAULT_PDF_SCALE)
+        return true
+      }
+      return false
+    }
+    if (meta || event.altKey || event.shiftKey) {
+      return false
+    }
+    const key = event.key.toLowerCase()
+    if (key === 'escape') {
+      if (annotationUi.drawingTool || annotationUi.textTool) {
+        selectTool()
+        return true
+      }
+      return false
+    }
+    if (key === 'v') {
+      selectTool()
+      return true
+    }
+    if (pageOpPending || saving || exporting) {
+      return false
+    }
+    if (key === 't') {
+      if (!annotationUi.textTool) {
+        viewerRef.current?.setTextTool(true)
+      }
+      return true
+    }
+    const kind = TOOL_KEYS[key]
+    if (kind) {
+      if (annotationUi.drawingTool !== kind) {
+        viewerRef.current?.setDrawingTool(kind)
+      }
+      return true
+    }
+    return false
+  }
 
   function openFilePicker() {
     fileInputRef.current?.click()
@@ -558,18 +635,7 @@ function Editor({
     setUploadError(null)
     setSaveError(null)
     setOpeningDocumentId(null)
-    setAnnotationUi({
-      canHighlight: false,
-      canRemoveHighlight: false,
-      drawingTool: null,
-      textTool: false,
-      selectedNewText: null,
-      selectedImage: null,
-      selectedDrawing: false,
-      signatureTool: false,
-      selectedSignature: null,
-      hasUncommittedEdit: false,
-    })
+    setAnnotationUi(INITIAL_ANNOTATION_UI)
     setDashboardRefreshKey((current) => current + 1)
   }
 
@@ -855,21 +921,14 @@ function Editor({
           onTextTool={() => {
             viewerRef.current?.setTextTool()
           }}
-          onSelectTool={() => {
-            const tool = annotationUi.drawingTool
-            if (tool) {
-              viewerRef.current?.setDrawingTool(tool)
-            }
-            if (annotationUi.textTool) {
-              viewerRef.current?.setTextTool(false)
-            }
-            if (annotationUi.signatureTool) {
-              viewerRef.current?.stopSignaturePlacement()
-            }
-          }}
+          onSelectTool={selectTool}
           selectedNewText={annotationUi.selectedNewText}
           selectedImage={annotationUi.selectedImage}
           selectedDrawing={annotationUi.selectedDrawing}
+          drawingStyle={annotationUi.drawingStyle}
+          onDrawingStyle={(patch) => {
+            viewerRef.current?.setDrawingStyle(patch)
+          }}
           hasSignature={signatures.signature !== null}
           onNewTextStyle={(patch) => {
             viewerRef.current?.patchSelectedNewText(patch)
@@ -928,6 +987,7 @@ function Editor({
               setFocusPage(page)
             }}
             onAnnotationStateChange={setAnnotationUi}
+            onZoomRequest={setScale}
           />
         ) : restoring ? (
           <div className="viewer-status" role="status">
@@ -996,6 +1056,42 @@ function SearchHotkeys({ documentOpen }: { documentOpen: boolean }) {
 }
 
 const OPEN_DOCUMENT_KEY = 'pdfforge.openDocument'
+
+const TOOL_KEYS: Record<string, DrawingKind> = {
+  p: 'freehand',
+  l: 'line',
+  a: 'arrow',
+  r: 'rectangle',
+  o: 'ellipse',
+}
+
+/** Keys typed into these belong to the field, not to editor shortcuts. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false
+  }
+  return (
+    target.isContentEditable ||
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    target.closest('[role="menu"]') !== null
+  )
+}
+
+const INITIAL_ANNOTATION_UI: AnnotationUiState = {
+  canHighlight: false,
+  canRemoveHighlight: false,
+  drawingTool: null,
+  textTool: false,
+  selectedNewText: null,
+  selectedImage: null,
+  selectedDrawing: false,
+  drawingStyle: DEFAULT_DRAWING_STYLE,
+  signatureTool: false,
+  selectedSignature: null,
+  hasUncommittedEdit: false,
+}
 
 function loadedSnapshot(pdfBytes: Uint8Array): DocumentSnapshot {
   return {

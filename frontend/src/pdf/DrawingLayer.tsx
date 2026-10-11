@@ -280,8 +280,8 @@ function draftAnnotation(draft: DrawingDraft): DrawingAnnotation {
     pageNumber: draft.pageNumber,
     kind: draft.kind,
     points: draft.points,
-    color: DRAWING_COLOR,
+    color: draft.color ?? DRAWING_COLOR,
     opacity: DRAWING_OPACITY,
-    thickness: DRAWING_THICKNESS,
+    thickness: draft.thickness ?? DRAWING_THICKNESS,
   }
 }

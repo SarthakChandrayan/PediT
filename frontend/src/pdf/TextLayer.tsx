@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent,
 } from 'react'
 import type { PageViewport, PDFPageProxy } from 'pdfjs-dist'
 import {
@@ -17,12 +18,23 @@ import {
   type PdfFontRecord,
   type TextColorSample,
 } from './textAppearance.ts'
-import { pdfRectForRun, layoutTextItem, type LaidOutTextItem } from './coordinates.ts'
+import {
+  pdfPointToViewport,
+  pdfRectForRun,
+  layoutTextItem,
+  type LaidOutTextItem,
+} from './coordinates.ts'
 import { markupCoveringRect, runAllowsPartialSelection } from './highlights.ts'
 import { RunHighlightUnderlay, RunMarkupLines } from './HighlightLayer.tsx'
 import { useHighlights } from './HighlightContext.tsx'
 import type { PDFDocumentProxy } from './pdfjs.ts'
-import { textRunId, type TextEditSource, type TextRunAppearance } from './textEdits.ts'
+import { BLOCK_WRAP_SLACK, groupTextBlocks, type TextBlock } from './textBlocks.ts'
+import {
+  textRunId,
+  type TextBlockLayout,
+  type TextEditSource,
+  type TextRunAppearance,
+} from './textEdits.ts'
 import { useTextEditor } from './TextEditorContext.tsx'
 
 type PageTextContent = Awaited<ReturnType<PDFPageProxy['getTextContent']>>
@@ -124,6 +136,85 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
     return laidOut
   }, [loaded?.colors, loaded?.fonts, pageNumber, textContent, viewport])
 
+  const blocks = useMemo(() => {
+    if (viewport.rotation % 360 !== 0) {
+      return { byRun: new Map<string, TextBlock>(), byId: new Map<string, TextBlock>() }
+    }
+    const eligible = runs.filter(({ run }) => isParagraphRun(run))
+    const grouped = groupTextBlocks(
+      eligible.map(({ id, run }) => ({
+        id,
+        str: run.str,
+        x: run.pdfOrigin.x,
+        baseline: run.pdfOrigin.y,
+        width: run.pdfWidth,
+        fontSize: Math.hypot(run.transform[2], run.transform[3]),
+        fontKey: run.fontName,
+      })),
+    )
+    const byRun = new Map<string, TextBlock>()
+    const byId = new Map<string, TextBlock>()
+    for (const block of grouped) {
+      byId.set(block.id, block)
+      for (const runId of block.runIds) {
+        byRun.set(runId, block)
+      }
+    }
+    return { byRun, byId }
+  }, [runs, viewport.rotation])
+
+  const runsById = useMemo(() => new Map(runs.map((item) => [item.id, item])), [runs])
+  const [pendingCaret, setPendingCaret] = useState<number | null>(null)
+  const [hoveredBlock, setHoveredBlock] = useState<string | null>(null)
+
+  const blockSource = (block: TextBlock): TextEditSource | null => {
+    const members = block.runIds
+      .map((runId) => runsById.get(runId))
+      .filter((item): item is PositionedRun => item !== undefined)
+    const first = members[0]
+    if (!first) {
+      return null
+    }
+    const layout: TextBlockLayout = {
+      left: block.left,
+      width: block.width,
+      firstBaseline: block.firstBaseline,
+      lineHeight: block.lineHeight,
+      fontSize: block.fontSize,
+      indent: block.indent,
+      members: members.map(({ run, appearance }) => ({
+        pdfX: run.pdfOrigin.x,
+        pdfY: run.pdfOrigin.y,
+        width: run.pdfWidth,
+        height: run.pdfHeight,
+        transform: [...run.transform],
+        appearance,
+      })),
+    }
+    return {
+      id: block.id,
+      pageNumber,
+      originalText: block.text,
+      pdfX: block.left,
+      pdfY: block.firstBaseline,
+      width: block.width,
+      height: block.firstBaseline - block.lastBaseline + block.fontSize,
+      transform: [...first.run.transform],
+      fontName: first.appearance.pdfFontName ?? first.run.fontName,
+      appearance: first.appearance,
+      block: layout,
+    }
+  }
+
+  const beginBlockEdit = (block: TextBlock, draft: string, caret: number | null) => {
+    const source = blockSource(block)
+    if (!source) {
+      return
+    }
+    setPendingCaret(caret)
+    editor.beginEdit(source, draft)
+  }
+
   useEffect(() => {
     registerRuns(
       pageNumber,
@@ -147,7 +238,87 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
 
   return (
     <div className="text-layer" aria-label={`Text on page ${pageNumber}`}>
+      {hoveredBlock && blocks.byId.has(hoveredBlock) ? (
+        <BlockOutline
+          frame={blockFrame(blocks.byId.get(hoveredBlock)!, runsById, viewport)}
+        />
+      ) : null}
       {runs.map(({ id, run, appearance }) => {
+        const block = blocks.byRun.get(id)
+        if (block) {
+          const blockEdit = editor.edits.find((item) => item.id === block.id)
+          const activeBlock = editor.active?.id === block.id
+          const isFirst = block.runIds[0] === id
+          if (activeBlock || blockEdit) {
+            if (!isFirst) {
+              return null
+            }
+            const frame = blockFrame(block, runsById, viewport)
+            const shownAppearance =
+              (activeBlock ? editor.active?.appearance : blockEdit?.appearance) ?? appearance
+            if (activeBlock && editor.active) {
+              return (
+                <BlockEditor
+                  key={block.id}
+                  frame={frame}
+                  run={run}
+                  appearance={shownAppearance}
+                  draft={editor.active.draft}
+                  initialCaret={pendingCaret}
+                  onDraft={editor.updateDraft}
+                  onCommit={editor.commitEdit}
+                  onCancel={editor.cancelEdit}
+                />
+              )
+            }
+            return (
+              <BlockRevision
+                key={block.id}
+                frame={frame}
+                run={run}
+                appearance={shownAppearance}
+                text={blockEdit!.editedText}
+                onEdit={(caret) => {
+                  beginBlockEdit(block, blockEdit!.editedText, caret)
+                }}
+              />
+            )
+          }
+          return (
+            <SelectableRun
+              key={id}
+              id={id}
+              pageNumber={pageNumber}
+              run={run}
+              inBlock
+              onHover={(inside) => {
+                setHoveredBlock((current) =>
+                  inside ? block.id : current === block.id ? null : current,
+                )
+              }}
+              onClick={(event) => {
+                const selection = window.getSelection()
+                if (selection && !selection.isCollapsed && selection.toString().length > 0) {
+                  return
+                }
+                const covering = markupCoveringRect(
+                  highlights.markups,
+                  pageNumber,
+                  pdfRectForRun(run),
+                )
+                if (covering && highlights.selectedId !== covering.id) {
+                  highlights.selectMarkup(covering.id)
+                  return
+                }
+                const local = caretOffsetAt(event.clientX, event.clientY, event.currentTarget)
+                const caret = local === null ? null : (block.runOffsets[id] ?? 0) + local
+                setHoveredBlock(null)
+                beginBlockEdit(block, block.text, caret)
+              }}
+            />
+          )
+        }
+
         const edit = editor.edits.find((item) => item.id === id)
         const source = sourceFromRun(id, pageNumber, run, appearance)
         if (editor.active?.id === id) {
@@ -226,12 +397,16 @@ function SelectableRun({
   id,
   pageNumber,
   run,
+  inBlock,
+  onHover,
   onClick,
 }: {
   id: string
   pageNumber: number
   run: LaidOutTextItem
-  onClick: () => void
+  inBlock?: boolean
+  onHover?: (inside: boolean) => void
+  onClick: (event: MouseEvent<HTMLSpanElement>) => void
 }) {
   const glyphsRef = useRef<HTMLSpanElement>(null)
 
@@ -257,8 +432,10 @@ function SelectableRun({
 
   return (
     <span
-      className="text-layer__item"
+      className={inBlock ? 'text-layer__item text-layer__item--block' : 'text-layer__item'}
       data-text-run={id}
+      onMouseEnter={onHover ? () => onHover(true) : undefined}
+      onMouseLeave={onHover ? () => onHover(false) : undefined}
       style={{
         ...boxStyle(run),
         fontSize: `${run.fontSize}px`,
@@ -362,6 +539,278 @@ function TextRunEditor({
         }}
       />
     </div>
+  )
+}
+
+/** Screen geometry for a paragraph, in CSS pixels relative to the page. */
+type BlockFrame = {
+  left: number
+  top: number
+  width: number
+  /** Height that covers every original run. */
+  coverHeight: number
+  fontSize: number
+  lineHeight: number
+  indent: number
+  /** Distance from `top` to the first baseline. */
+  baseline: number
+}
+
+function blockFrame(
+  block: TextBlock,
+  runsById: Map<string, PositionedRun>,
+  viewport: PageViewport,
+): BlockFrame {
+  const scale = viewport.scale
+  const origin = pdfPointToViewport(viewport, { x: block.left, y: block.firstBaseline })
+  let top = Number.POSITIVE_INFINITY
+  let bottom = Number.NEGATIVE_INFINITY
+  let right = origin.x + block.width * scale
+  for (const runId of block.runIds) {
+    const box = runsById.get(runId)?.run.box
+    if (box) {
+      top = Math.min(top, box.top)
+      bottom = Math.max(bottom, box.top + box.height)
+      right = Math.max(right, box.left + box.width)
+    }
+  }
+  const fontSize = block.fontSize * scale
+  const lineHeight = Math.max(block.lineHeight * scale, fontSize)
+  const family = 'sans-serif'
+  // Put the first baseline of the CSS line box on the PDF baseline.
+  const baselineInLine = (lineHeight - fontSize) / 2 + cssBaselineOffset(fontSize, family)
+  const frameTop = Math.min(origin.y - baselineInLine, Number.isFinite(top) ? top : origin.y)
+  return {
+    left: origin.x,
+    top: frameTop,
+    // Same slack as export (BLOCK_WRAP_SLACK) so screen and saved PDF wrap alike.
+    width: Math.max((right - origin.x) * BLOCK_WRAP_SLACK + 0.5 * scale, fontSize),
+    coverHeight: Math.max((Number.isFinite(bottom) ? bottom : origin.y) - frameTop, lineHeight),
+    fontSize,
+    lineHeight,
+    indent: block.indent * scale,
+    baseline: origin.y - frameTop,
+  }
+}
+
+function blockStyle(
+  frame: BlockFrame,
+  run: LaidOutTextItem,
+  appearance: TextRunAppearance | undefined,
+): CSSProperties {
+  const face = replacementFontCss(appearance, run.fontFamily)
+  const fontSize = frame.fontSize
+  const baselineInLine =
+    (frame.lineHeight - fontSize) / 2 + cssBaselineOffset(fontSize, face.fontFamily)
+  return {
+    left: `${frame.left}px`,
+    top: `${frame.top}px`,
+    width: `${frame.width}px`,
+    minHeight: `${frame.coverHeight}px`,
+    // Only the original paragraph area is whited out, exactly as on export;
+    // text that runs past it shows over whatever is below.
+    background: `linear-gradient(#fff ${frame.coverHeight}px, transparent ${frame.coverHeight}px)`,
+    paddingTop: `${Math.max(0, frame.baseline - baselineInLine)}px`,
+    textIndent: `${frame.indent}px`,
+    fontSize: `${fontSize}px`,
+    lineHeight: `${frame.lineHeight}px`,
+    fontFamily: face.fontFamily,
+    fontWeight: face.fontWeight,
+    fontStyle: face.fontStyle,
+    color: appearance?.color ? cssColor(appearance.color) : undefined,
+  }
+}
+
+function BlockOutline({ frame }: { frame: BlockFrame }) {
+  return (
+    <div
+      className="text-block-outline"
+      aria-hidden="true"
+      style={{
+        left: `${frame.left - 3}px`,
+        top: `${frame.top - 2}px`,
+        width: `${frame.width + 6}px`,
+        height: `${frame.coverHeight + 4}px`,
+      }}
+    />
+  )
+}
+
+function BlockEditor({
+  frame,
+  run,
+  appearance,
+  draft,
+  initialCaret,
+  onDraft,
+  onCommit,
+  onCancel,
+}: {
+  frame: BlockFrame
+  run: LaidOutTextItem
+  appearance: TextRunAppearance | undefined
+  draft: string
+  initialCaret: number | null
+  onDraft: (draft: string) => void
+  onCommit: () => void
+  onCancel: () => void
+}) {
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const ignoreBlur = useRef(false)
+  const [overflow, setOverflow] = useState(false)
+  const caretRef = useRef(initialCaret)
+
+  useEffect(() => {
+    const input = inputRef.current
+    if (!input) {
+      return
+    }
+    input.focus({ preventScroll: true })
+    const caret = caretRef.current ?? input.value.length
+    const clamped = Math.min(Math.max(caret, 0), input.value.length)
+    input.setSelectionRange(clamped, clamped)
+  }, [])
+
+  useLayoutEffect(() => {
+    const input = inputRef.current
+    if (!input) {
+      return
+    }
+    // Grow with the text like a word-processor paragraph.
+    input.style.height = 'auto'
+    input.style.height = `${Math.max(input.scrollHeight, frame.coverHeight)}px`
+    setOverflow(input.scrollHeight > frame.coverHeight + frame.lineHeight * 0.5)
+  }, [draft, frame.coverHeight, frame.lineHeight])
+
+  const style = blockStyle(frame, run, appearance)
+  return (
+    <>
+    <textarea
+      ref={inputRef}
+      className="text-block text-block--editing"
+      data-overflow={overflow ? 'true' : undefined}
+      style={style}
+      value={draft}
+      aria-label="Edit paragraph"
+      aria-describedby={overflow ? 'block-overflow-note' : undefined}
+      spellCheck
+      autoComplete="off"
+      onChange={(event) => {
+        onDraft(event.target.value)
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          ignoreBlur.current = true
+          onCancel()
+        } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault()
+          onCommit()
+        }
+      }}
+      onBlur={() => {
+        if (ignoreBlur.current) {
+          ignoreBlur.current = false
+          return
+        }
+        onCommit()
+      }}
+    />
+    {overflow ? (
+      <p
+        id="block-overflow-note"
+        className="text-block-note"
+        style={{ left: `${frame.left}px`, top: `${frame.top - 30}px` }}
+      >
+        Text runs past the original paragraph and may overlap what's below.
+      </p>
+    ) : null}
+    </>
+  )
+}
+
+function BlockRevision({
+  frame,
+  run,
+  appearance,
+  text,
+  onEdit,
+}: {
+  frame: BlockFrame
+  run: LaidOutTextItem
+  appearance: TextRunAppearance | undefined
+  text: string
+  onEdit: (caret: number | null) => void
+}) {
+  return (
+    <div
+      className="text-block text-block--revised"
+      style={blockStyle(frame, run, appearance)}
+      role="button"
+      tabIndex={0}
+      aria-label="Edited paragraph. Click to edit."
+      onClick={(event) => {
+        onEdit(caretOffsetAt(event.clientX, event.clientY, event.currentTarget))
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          onEdit(null)
+        }
+      }}
+    >
+      {text}
+    </div>
+  )
+}
+
+/** Character offset of the point within `container`'s text, or null. */
+function caretOffsetAt(x: number, y: number, container: HTMLElement): number | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+  }
+  let node: Node | null = null
+  let offset = 0
+  const position = doc.caretPositionFromPoint?.(x, y)
+  if (position) {
+    node = position.offsetNode
+    offset = position.offset
+  } else {
+    const range = doc.caretRangeFromPoint?.(x, y)
+    if (range) {
+      node = range.startContainer
+      offset = range.startOffset
+    }
+  }
+  if (!node || !container.contains(node) || node.nodeType !== Node.TEXT_NODE) {
+    return null
+  }
+  // Count characters in text nodes before this one inside the container.
+  let total = 0
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    if (current === node) {
+      return total + offset
+    }
+    if (!(current.parentElement?.closest('[aria-hidden="true"]'))) {
+      total += current.textContent?.length ?? 0
+    }
+  }
+  return null
+}
+
+/** Horizontal, unrotated runs can be edited as paragraphs. */
+function isParagraphRun(run: LaidOutTextItem): boolean {
+  const [a, b, c, d] = run.transform
+  return (
+    !run.vertical &&
+    run.box.cssTransform === null &&
+    a > 0 &&
+    d > 0 &&
+    Math.abs(b) < 1e-6 &&
+    Math.abs(c) < 1e-6
   )
 }
 
