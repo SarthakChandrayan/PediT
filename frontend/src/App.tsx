@@ -675,6 +675,7 @@ function Editor({
   async function runPageOperation(
     operate: (bytes: Uint8Array) => Promise<Uint8Array>,
     nextPageNumber: number,
+    options: { mergeWithPrevious?: boolean } = {},
   ) {
     if (!fileName || pageOpLock.current || saveLock.current || exporting) {
       return
@@ -699,7 +700,10 @@ function Editor({
         return
       }
 
-      history.commit(() => withPageOperation(next), { pdfChanged: true })
+      history.commit(() => withPageOperation(next), {
+        pdfChanged: true,
+        mergeWithPrevious: options.mergeWithPrevious,
+      })
       setFocusPage(nextPageNumber)
     } catch (error) {
       if (openGeneration.current !== generation) {
@@ -988,6 +992,16 @@ function Editor({
             }}
             onAnnotationStateChange={setAnnotationUi}
             onZoomRequest={setScale}
+            onTextReflow={() => {
+              // After the commit settles: export applies the edit and moves
+              // the content below it, then the page reloads from that PDF.
+              window.setTimeout(() => {
+                // Merged with the edit, so one undo reverses both.
+                void runPageOperation(async (bytes) => bytes, currentPage, {
+                  mergeWithPrevious: true,
+                })
+              }, 0)
+            }}
           />
         ) : restoring ? (
           <div className="viewer-status" role="status">

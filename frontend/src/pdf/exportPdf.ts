@@ -39,6 +39,7 @@ import type {
 import { BLOCK_WRAP_SLACK, wrapStyledText } from './textBlocks.ts'
 import type { Region } from './contentStream.ts'
 import { removeOriginalText } from './textRemoval.ts'
+import { reflowPage, type ReflowRequest } from './reflow.ts'
 
 const TEXT_COLOR = rgb(0, 0, 0)
 const COVER_COLOR = rgb(1, 1, 1)
@@ -137,6 +138,7 @@ export async function exportEditedPdf(
   })
   const fonts = new Map<StandardFonts, PDFFont>()
   const originalFonts = new Map<string, PDFFont | null>()
+  const grown: { pageIndex: number; draw: () => void; request: ReflowRequest }[] = []
 
   for (let index = 0; index < pages.length; index += 1) {
     const page = pages[index]
@@ -216,9 +218,31 @@ export async function exportEditedPdf(
           .filter((segment) => segment.style === index)
           .map((segment) => segment.text)
           .join('')
-        styleFonts.push(await fontFor(styles[index], edit.fontName, text))
+        // No fallback name: a style without a font reference (a new bold or
+        // italic the PDF has no face for) must use a standard font.
+        styleFonts.push(await fontFor(styles[index], undefined, text))
       }
-      applyBlockEdit(page, styleFonts, styles, edit, block, segments, pageMarkups)
+      const placed = applyBlockEdit(page, styleFonts, styles, edit, block, segments, pageMarkups)
+      const shift =
+        block.lineCount && placed.lineCount > block.lineCount
+          ? (placed.lineCount - block.lineCount) * block.lineHeight
+          : 0
+      if (shift > 0.5 && block.below && block.pageTextTop !== undefined) {
+        // Drawn after everything else on the page, once the content below has moved.
+        const regions = coveredRegions(edit)
+        grown.push({
+          pageIndex: edit.pageNumber - 1,
+          draw: placed.draw,
+          request: {
+            cutY: Math.min(...regions.map((region) => region.y0)),
+            shift,
+            below: block.below,
+            pageTextTop: block.pageTextTop,
+          },
+        })
+      } else {
+        placed.draw()
+      }
     } else {
       applyTextEdit(page, await fontFor(edit.appearance, edit.fontName, null), edit, pageMarkups)
     }
@@ -249,6 +273,16 @@ export async function exportEditedPdf(
       fonts.set(standard, font)
     }
     paintCreatedText(page, font, created)
+  }
+
+  // Paragraphs that grew push the rest of their page down. Bottom-most first
+  // on each page, and last page first, so inserted pages never shift a page
+  // that still has work to do.
+  grown.sort((a, b) => b.pageIndex - a.pageIndex || a.request.cutY - b.request.cutY)
+  for (const item of grown) {
+    const page = pdf.getPage(item.pageIndex)
+    reflowPage(pdf, page, item.pageIndex, item.request)
+    item.draw()
   }
 
   for (const markup of highlights) {
@@ -313,7 +347,7 @@ function applyBlockEdit(
   block: TextBlockLayout,
   segments: readonly TextSegment[],
   highlights: readonly TextMarkup[],
-): void {
+): { lineCount: number; draw: () => void } {
   for (const member of block.members) {
     const placed = placeEdit({
       ...edit,
@@ -331,7 +365,7 @@ function applyBlockEdit(
 
   const fontSize = block.fontSize
   if (!(fontSize > 0)) {
-    return
+    return { lineCount: 0, draw: () => undefined }
   }
   const scale =
     edit.appearance?.horizontalScale && edit.appearance.horizontalScale > 0
@@ -349,33 +383,36 @@ function applyBlockEdit(
     measure,
   )
 
-  page.pushOperators(
-    pushGraphicsState(),
-    setTextRenderingMode(TextRenderingMode.Fill),
-    setCharacterSpacing(0),
-    setWordSpacing(0),
-    setCharacterSqueeze(100 * scale),
-    setTextRise(0),
-  )
-  lines.forEach((line, index) => {
-    let x = block.left + (index === 0 ? block.indent : 0)
-    const y = block.firstBaseline - index * block.lineHeight
-    for (const piece of line) {
-      const font = fontOf(piece.style)
-      const text = textForStandardFont(font, piece.text)
-      if (text.trim().length > 0) {
-        page.drawText(text, {
-          x,
-          y,
-          size: fontSize,
-          font,
-          color: appearanceColor(styles[piece.style] ?? edit.appearance),
-        })
+  const draw = () => {
+    page.pushOperators(
+      pushGraphicsState(),
+      setTextRenderingMode(TextRenderingMode.Fill),
+      setCharacterSpacing(0),
+      setWordSpacing(0),
+      setCharacterSqueeze(100 * scale),
+      setTextRise(0),
+    )
+    lines.forEach((line, index) => {
+      let x = block.left + (index === 0 ? block.indent : 0)
+      const y = block.firstBaseline - index * block.lineHeight
+      for (const piece of line) {
+        const font = fontOf(piece.style)
+        const text = textForStandardFont(font, piece.text)
+        if (text.trim().length > 0) {
+          page.drawText(text, {
+            x,
+            y,
+            size: fontSize,
+            font,
+            color: appearanceColor(styles[piece.style] ?? edit.appearance),
+          })
+        }
+        x += measure(piece.text, piece.style)
       }
-      x += measure(piece.text, piece.style)
-    }
-  })
-  page.pushOperators(popGraphicsState())
+    })
+    page.pushOperators(popGraphicsState())
+  }
+  return { lineCount: lines.length, draw }
 }
 
 /** Areas, in PDF user space, whose original glyphs an edit replaces. */

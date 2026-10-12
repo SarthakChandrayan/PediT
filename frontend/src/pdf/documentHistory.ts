@@ -43,6 +43,12 @@ export type SelectionPatch = {
 export type CommitOptions = {
   /** True when this step replaces the PDF bytes, such as a page operation. */
   pdfChanged?: boolean
+  /**
+   * Folds this step into the previous one, so a single undo reverses both.
+   * For follow-up work the app does on the user's behalf, such as applying a
+   * paragraph that grew.
+   */
+  mergeWithPrevious?: boolean
 }
 
 type Gesture = {
@@ -178,8 +184,9 @@ export function commitDocument(
     { ...drafted, pdfBytes: pdfChanged ? drafted.pdfBytes : base.pdfBytes },
     pdfChanged,
   )
+  const merge = options?.mergeWithPrevious === true && settled.past.length > 0
   return {
-    past: [...settled.past, settled.present],
+    past: merge ? settled.past : [...settled.past, settled.present],
     present: { epoch: settled.nextEpoch, snapshot },
     future: [],
     savedEpoch: settled.savedEpoch,
@@ -530,7 +537,9 @@ function sameBlock(left: TextEdit['block'], right: TextEdit['block']): boolean {
     left.lineHeight === right.lineHeight &&
     left.fontSize === right.fontSize &&
     left.indent === right.indent &&
-    left.members.length === right.members.length
+    left.members.length === right.members.length &&
+    left.styles.length === right.styles.length &&
+    left.styles.every((style, index) => sameAppearance(style, right.styles[index]))
   )
 }
 

@@ -484,6 +484,47 @@ describe('document history', () => {
   })
 })
 
+describe('mergeWithPrevious', () => {
+  it('folds a follow-up PDF change into the previous step for one undo', async () => {
+    const opened = await openPdf()
+    const original = opened.present.snapshot
+    const edited = commitDocument(opened, (snapshot) => ({
+      ...snapshot,
+      texts: [
+        {
+          id: 't1',
+          pageNumber: 1,
+          text: 'Hello',
+          pdfX: 72,
+          pdfY: 700,
+          width: 40,
+          fontName: 'Helvetica',
+          fontSize: 12,
+          bold: false,
+          italic: false,
+          color: { r: 0, g: 0, b: 0 },
+          horizontalScale: 1,
+        } as DocumentSnapshot['texts'][number],
+      ],
+    }))
+    const applied = commitDocument(
+      edited,
+      (snapshot) => withPageOperation(copyBytes(snapshot.pdfBytes)),
+      { pdfChanged: true, mergeWithPrevious: true },
+    )
+    expect(applied.past).toHaveLength(1)
+    const undone = undoHistory(applied)
+    expect(undone.present.snapshot.texts).toEqual(original.texts)
+    expect(undone.past).toHaveLength(0)
+  })
+})
+
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return copy
+}
+
 async function openPdf(): Promise<DocumentHistory> {
   return createDocumentHistory(snapshotOf(await blankPdf()))
 }

@@ -53,6 +53,12 @@ export type TextBlockLayout = {
   members: readonly TextBlockMember[]
   /** Distinct text styles in the paragraph, in first-seen order. */
   styles: readonly TextRunAppearance[]
+  /** Lines the original paragraph used. */
+  lineCount?: number
+  /** Text lines below the paragraph (top/bottom y), for moving them down. */
+  below?: readonly { top: number; bottom: number }[]
+  /** Highest text on the page; stands in for the page margins. */
+  pageTextTop?: number
 }
 
 /**
@@ -143,14 +149,22 @@ export function updateTextDraft(
   state: EditorState,
   draft: string,
   draftSegments?: readonly TextSegment[],
+  styles?: readonly TextRunAppearance[],
 ): EditorState {
   if (!state.active || (state.active.draft === draft && draftSegments === undefined)) {
     return state
   }
 
+  const block = state.active.block
   return {
     edits: state.edits,
-    active: { ...state.active, draft, draftSegments: draftSegments ?? state.active.draftSegments },
+    active: {
+      ...state.active,
+      draft,
+      draftSegments: draftSegments ?? state.active.draftSegments,
+      // Formatting adds styles (bold, italic, color) as the user applies them.
+      block: block && styles ? { ...block, styles } : block,
+    },
   }
 }
 

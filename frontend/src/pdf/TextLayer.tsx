@@ -31,6 +31,17 @@ import { useHighlights } from './HighlightContext.tsx'
 import type { PDFDocumentProxy } from './pdfjs.ts'
 import { BLOCK_WRAP_SLACK, groupTextBlocks, type TextBlock } from './textBlocks.ts'
 import {
+  appearanceKey,
+  isBold,
+  isItalic,
+  restyleRange,
+  styleIndex,
+  styleVariant,
+  stylesInRange,
+  type StylePatch,
+} from './richText.ts'
+import { Icon } from '../components/icons.tsx'
+import {
   textRunId,
   type TextBlockLayout,
   type TextEditSource,
@@ -166,6 +177,13 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
   }, [runs, viewport.rotation])
 
   const runsById = useMemo(() => new Map(runs.map((item) => [item.id, item])), [runs])
+  const pageStyles = useMemo(() => {
+    const unique = new Map<string, TextRunAppearance>()
+    for (const { appearance } of runs) {
+      unique.set(appearanceKey(appearance), appearance)
+    }
+    return [...unique.values()]
+  }, [runs])
   const [pendingCaret, setPendingCaret] = useState<number | null>(null)
   const [hoveredBlock, setHoveredBlock] = useState<string | null>(null)
 
@@ -194,10 +212,27 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
       text: segment.text,
       style: runStyles.get(segment.runId) ?? 0,
     }))
+    // Where the rest of the page's text sits, so export can move it down
+    // when the paragraph grows.
+    const memberIds = new Set(block.runIds)
+    const blockBottom = Math.min(...members.map(({ run }) => pdfRectForRun(run).y))
+    let pageTextTop = Number.NEGATIVE_INFINITY
+    const bands: { top: number; bottom: number }[] = []
+    for (const item of runs) {
+      const rect = pdfRectForRun(item.run)
+      pageTextTop = Math.max(pageTextTop, rect.y + rect.height)
+      if (!memberIds.has(item.id) && rect.y + rect.height <= blockBottom + 0.5) {
+        bands.push({ top: rect.y + rect.height, bottom: rect.y })
+      }
+    }
+    const below = mergeBands(bands)
     const layout: TextBlockLayout = {
+      lineCount: block.lines.length,
+      below,
+      pageTextTop: Number.isFinite(pageTextTop) ? pageTextTop : undefined,
       styles,
       left: block.left,
-      width: block.width,
+      width: wrapWidthFor(block),
       firstBaseline: block.firstBaseline,
       lineHeight: block.lineHeight,
       fontSize: block.fontSize,
@@ -225,6 +260,34 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
       block: layout,
       segments,
     }
+  }
+
+  /**
+   * Width new text wraps at. A real paragraph keeps its own width. A block
+   * whose line breaks are all deliberate (a list, "Label: values" lines) can
+   * use the page's text column, like a word processor: up to a right margin
+   * equal to the left one, unless other text sits beside the block.
+   */
+  const wrapWidthFor = (block: TextBlock): number => {
+    const hardBreaks = (block.text.match(/\n/g) ?? []).length
+    if (hardBreaks < block.lines.length - 1) {
+      return block.width
+    }
+    const [pageLeft, , pageRight] = viewport.viewBox as [number, number, number, number]
+    const columnRight = pageRight - (block.left - pageLeft)
+    const blockRight = block.left + block.width
+    if (columnRight <= blockRight) {
+      return block.width
+    }
+    const members = new Set(block.runIds)
+    const beside = runs.some(
+      ({ id, run }) =>
+        !members.has(id) &&
+        run.pdfOrigin.x > blockRight + block.fontSize &&
+        run.pdfOrigin.y <= block.firstBaseline + block.fontSize &&
+        run.pdfOrigin.y >= block.lastBaseline - block.fontSize,
+    )
+    return beside ? block.width : columnRight - block.left
   }
 
   const beginBlockEdit = (
@@ -279,7 +342,7 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
             if (!isFirst) {
               return null
             }
-            const frame = blockFrame(block, runsById, viewport)
+            const frame = blockFrame(block, runsById, viewport, wrapWidthFor(block))
             if (activeBlock && editor.active) {
               const styles = editor.active.block?.styles ?? [appearance]
               return (
@@ -288,10 +351,16 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
                   frame={frame}
                   run={run}
                   styles={styles}
+                  pageStyles={pageStyles}
                   segments={editor.active.draftSegments ?? [{ text: editor.active.draft, style: 0 }]}
                   initialCaret={pendingCaret}
                   onDraft={editor.updateDraft}
-                  onCommit={editor.commitEdit}
+                  onCommit={(grew) => {
+                    editor.commitEdit()
+                    if (grew) {
+                      editor.requestReflow?.()
+                    }
+                  }}
                   onCancel={editor.cancelEdit}
                 />
               )
@@ -586,12 +655,13 @@ function blockFrame(
   block: TextBlock,
   runsById: Map<string, PositionedRun>,
   viewport: PageViewport,
+  wrapWidth: number = block.width,
 ): BlockFrame {
   const scale = viewport.scale
   const origin = pdfPointToViewport(viewport, { x: block.left, y: block.firstBaseline })
   let top = Number.POSITIVE_INFINITY
   let bottom = Number.NEGATIVE_INFINITY
-  let right = origin.x + block.width * scale
+  let right = origin.x + wrapWidth * scale
   for (const runId of block.runIds) {
     const box = runsById.get(runId)?.run.box
     if (box) {
@@ -662,10 +732,19 @@ function BlockOutline({ frame }: { frame: BlockFrame }) {
   )
 }
 
+const INK_COLORS = [
+  { name: 'Black', value: { r: 0, g: 0, b: 0 } },
+  { name: 'Dark gray', value: { r: 0.33, g: 0.33, b: 0.33 } },
+  { name: 'Red', value: { r: 0.8, g: 0.12, b: 0.12 } },
+  { name: 'Blue', value: { r: 0.11, g: 0.36, b: 0.85 } },
+  { name: 'Green', value: { r: 0.12, g: 0.54, b: 0.3 } },
+] as const
+
 function BlockEditor({
   frame,
   run,
   styles,
+  pageStyles,
   segments,
   initialCaret,
   onDraft,
@@ -675,18 +754,27 @@ function BlockEditor({
   frame: BlockFrame
   run: LaidOutTextItem
   styles: readonly TextRunAppearance[]
+  /** Every style on the page, to find matching bold/italic faces. */
+  pageStyles: readonly TextRunAppearance[]
   segments: readonly TextSegment[]
   initialCaret: number | null
-  onDraft: (draft: string, draftSegments: readonly TextSegment[]) => void
-  onCommit: () => void
+  onDraft: (
+    draft: string,
+    draftSegments: readonly TextSegment[],
+    styles: readonly TextRunAppearance[],
+  ) => void
+  /** `grew` is true when the text now needs more lines than the original. */
+  onCommit: (grew: boolean) => void
   onCancel: () => void
 }) {
   const editorRef = useRef<HTMLDivElement>(null)
   const ignoreBlur = useRef(false)
+  const stylesRef = useRef<readonly TextRunAppearance[]>(styles)
   const [overflow, setOverflow] = useState(false)
+  const [active, setActive] = useState({ bold: false, italic: false })
   // Rendered once: after mount the browser owns the DOM, and every change is
   // read back from it. Re-rendering the spans would reset the caret.
-  const [initial] = useState(() => ({ segments, caret: initialCaret }))
+  const [initial] = useState(() => ({ segments, caret: initialCaret, styles }))
 
   const measure = useCallback(() => {
     const element = editorRef.current
@@ -706,19 +794,132 @@ function BlockEditor({
     measure()
   }, [initial.caret, measure])
 
+  // Reflect the selection's weight and slant in the format bar.
+  useEffect(() => {
+    const onSelection = () => {
+      const root = editorRef.current
+      const range = selectionRangeIn(root)
+      if (!root || !range) {
+        return
+      }
+      const current = readSegments(root)
+      let [from, to] = range
+      if (from === to) {
+        from = Math.max(0, from - 1)
+        to = from + 1
+      }
+      const used = stylesInRange(current, from, to)
+      const list = stylesRef.current
+      const bold = used.length > 0 && used.every((index) => list[index] && isBold(list[index]!))
+      const italic =
+        used.length > 0 && used.every((index) => list[index] && isItalic(list[index]!))
+      setActive((previous) =>
+        previous.bold === bold && previous.italic === italic ? previous : { bold, italic },
+      )
+    }
+    document.addEventListener('selectionchange', onSelection)
+    return () => {
+      document.removeEventListener('selectionchange', onSelection)
+    }
+  }, [])
+
+  const grew = () => {
+    const element = editorRef.current
+    return element ? element.scrollHeight > frame.coverHeight + frame.lineHeight * 0.5 : false
+  }
+
   const emit = () => {
     const element = editorRef.current
     if (!element) {
       return
     }
     const next = readSegments(element)
-    onDraft(next.map((segment) => segment.text).join(''), next)
+    onDraft(next.map((segment) => segment.text).join(''), next, stylesRef.current)
     measure()
   }
 
-  const base = styles[0]
+  const format = (kind: 'bold' | 'italic' | { color: { r: number; g: number; b: number } }) => {
+    const root = editorRef.current
+    const range = selectionRangeIn(root)
+    if (!root || !range || range[0] === range[1]) {
+      return
+    }
+    const [from, to] = range
+    const current = readSegments(root)
+    let list = stylesRef.current
+    const used = stylesInRange(current, from, to)
+    let patch: StylePatch
+    if (kind === 'bold') {
+      patch = { bold: !used.every((index) => list[index] && isBold(list[index]!)) }
+    } else if (kind === 'italic') {
+      patch = { italic: !used.every((index) => list[index] && isItalic(list[index]!)) }
+    } else {
+      patch = { color: kind.color }
+    }
+    const remap = new Map<number, number>()
+    for (const index of used) {
+      const base = list[index]
+      if (!base) {
+        continue
+      }
+      const added = styleIndex(list, styleVariant(base, patch, pageStyles))
+      list = added.styles
+      remap.set(index, added.index)
+    }
+    const next = restyleRange(current, from, to, (style) => remap.get(style) ?? style)
+    stylesRef.current = list
+    renderSegments(root, next, list, run)
+    selectOffsets(root, from, to)
+    onDraft(next.map((segment) => segment.text).join(''), next, list)
+    measure()
+  }
+
+  const base = initial.styles[0]
+  const keepFocus = (event: MouseEvent<HTMLElement>) => {
+    event.preventDefault()
+  }
   return (
     <>
+      <div
+        className="text-block-toolbar"
+        role="toolbar"
+        aria-label="Text formatting"
+        style={{ left: `${frame.left}px`, top: `${frame.top - 44}px` }}
+        onMouseDown={keepFocus}
+      >
+        <button
+          type="button"
+          className="text-block-toolbar__button"
+          aria-pressed={active.bold}
+          aria-label="Bold"
+          data-tooltip="Bold  Ctrl+B"
+          onClick={() => format('bold')}
+        >
+          <Icon name="bold" />
+        </button>
+        <button
+          type="button"
+          className="text-block-toolbar__button"
+          aria-pressed={active.italic}
+          aria-label="Italic"
+          data-tooltip="Italic  Ctrl+I"
+          onClick={() => format('italic')}
+        >
+          <Icon name="italic" />
+        </button>
+        <span className="text-block-toolbar__divider" aria-hidden="true" />
+        {INK_COLORS.map((color) => (
+          <button
+            key={color.name}
+            type="button"
+            className="text-block-toolbar__swatch"
+            aria-label={`${color.name} text`}
+            data-tooltip={color.name}
+            style={{ background: cssColor(color.value) }}
+            onClick={() => format({ color: color.value })}
+          />
+        ))}
+      </div>
       <div
         ref={editorRef}
         className="text-block text-block--editing"
@@ -733,7 +934,7 @@ function BlockEditor({
         spellCheck
         onInput={emit}
         onBeforeInput={(event) => {
-          // Formatting would add tags the PDF writer cannot express.
+          // The browser's own formatting adds tags; formatting goes through format().
           const type = (event.nativeEvent as InputEvent).inputType
           if (type?.startsWith('format')) {
             event.preventDefault()
@@ -750,6 +951,7 @@ function BlockEditor({
         }}
         onKeyDown={(event) => {
           const meta = event.ctrlKey || event.metaKey
+          const key = event.key.toLowerCase()
           if (event.key === 'Escape') {
             event.preventDefault()
             event.stopPropagation()
@@ -757,12 +959,18 @@ function BlockEditor({
             onCancel()
           } else if (event.key === 'Enter' && meta) {
             event.preventDefault()
-            onCommit()
+            onCommit(grew())
           } else if (event.key === 'Enter') {
             event.preventDefault()
             insertPlainText('\n')
             emit()
-          } else if (meta && ['b', 'i', 'u'].includes(event.key.toLowerCase())) {
+          } else if (meta && key === 'b') {
+            event.preventDefault()
+            format('bold')
+          } else if (meta && key === 'i') {
+            event.preventDefault()
+            format('italic')
+          } else if (meta && key === 'u') {
             event.preventDefault()
           }
         }}
@@ -771,14 +979,14 @@ function BlockEditor({
             ignoreBlur.current = false
             return
           }
-          onCommit()
+          onCommit(grew())
         }}
       >
         {initial.segments.map((segment, index) => (
           <span
             key={index}
             data-style={segment.style}
-            style={segmentStyle(styles[segment.style] ?? base, run)}
+            style={segmentStyle(initial.styles[segment.style] ?? base, run)}
           >
             {segment.text}
           </span>
@@ -788,9 +996,9 @@ function BlockEditor({
         <p
           id="block-overflow-note"
           className="text-block-note"
-          style={{ left: `${frame.left}px`, top: `${frame.top - 30}px` }}
+          style={{ left: `${frame.left + frame.width}px`, top: `${frame.top - 30}px` }}
         >
-          Text runs past the original paragraph and may overlap what's below.
+          Text below will move down to make room.
         </p>
       ) : null}
     </>
@@ -848,55 +1056,155 @@ function segmentStyle(appearance: TextRunAppearance | undefined, run: LaidOutTex
   }
 }
 
-function appearanceKey(appearance: TextRunAppearance): string {
-  const color = appearance.color
-  return [
-    appearance.pdfFontName ?? '',
-    appearance.loadedName ?? '',
-    appearance.bold ? 'b' : '',
-    appearance.italic ? 'i' : '',
-    color ? `${color.r.toFixed(3)},${color.g.toFixed(3)},${color.b.toFixed(3)}` : '',
-  ].join('|')
-}
+type DomToken = { node: Node; start: number; text: string; style: number }
 
-/** Reads styled text back out of the editable paragraph. */
-function readSegments(root: HTMLElement): TextSegment[] {
-  const segments: TextSegment[] = []
-  const push = (text: string, style: number) => {
+/**
+ * The editable paragraph as ordered pieces of text. A <br>, or the start of a
+ * block element after text, counts as one "\n", matching readSegments.
+ */
+function flattenTokens(root: HTMLElement): DomToken[] {
+  const tokens: DomToken[] = []
+  let length = 0
+  let lastChar = ''
+  const add = (node: Node, text: string, style: number) => {
     if (text.length === 0) {
       return
     }
-    const last = segments[segments.length - 1]
-    if (last && last.style === style) {
-      last.text += text
-    } else {
-      segments.push({ text, style })
-    }
+    tokens.push({ node, start: length, text, style })
+    length += text.length
+    lastChar = text[text.length - 1]!
   }
   const walk = (node: Node, style: number) => {
     node.childNodes.forEach((child) => {
       if (child.nodeType === Node.TEXT_NODE) {
-        push(child.textContent ?? '', style)
+        add(child, child.textContent ?? '', style)
         return
       }
       if (!(child instanceof HTMLElement)) {
         return
       }
       if (child.tagName === 'BR') {
-        push('\n', style)
+        add(child, '\n', style)
         return
       }
       const own = child.dataset.style
       const childStyle = own !== undefined && Number.isFinite(Number(own)) ? Number(own) : style
-      const isBlock = child.tagName === 'DIV' || child.tagName === 'P'
-      const text = segments.map((segment) => segment.text).join('')
-      if (isBlock && text.length > 0 && !text.endsWith('\n')) {
-        push('\n', childStyle)
+      if ((child.tagName === 'DIV' || child.tagName === 'P') && length > 0 && lastChar !== '\n') {
+        add(child, '\n', childStyle)
       }
       walk(child, childStyle)
     })
   }
   walk(root, 0)
+  return tokens
+}
+
+/** Plain-text offset of a DOM position inside `root`. */
+function domOffset(root: HTMLElement, container: Node, offset: number): number {
+  const tokens = flattenTokens(root)
+  const total = tokens.reduce((sum, token) => sum + token.text.length, 0)
+  if (container.nodeType === Node.TEXT_NODE) {
+    const token = tokens.find((item) => item.node === container)
+    return token ? token.start + Math.min(offset, token.text.length) : total
+  }
+  const child = container.childNodes[offset]
+  if (!child) {
+    // After the container's last child: the end of the last token inside it.
+    let end = -1
+    for (const token of tokens) {
+      if (container === token.node || container.contains(token.node)) {
+        end = token.start + token.text.length
+      }
+    }
+    if (end >= 0) {
+      return end
+    }
+  }
+  for (const token of tokens) {
+    if (
+      child &&
+      (token.node === child ||
+        child.contains(token.node) ||
+        child.compareDocumentPosition(token.node) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ) {
+      return token.start
+    }
+  }
+  return total
+}
+
+/** The selection as [start, end) offsets in `root`'s text, or null. */
+function selectionRangeIn(root: HTMLElement | null): [number, number] | null {
+  const selection = window.getSelection()
+  if (!root || !selection || selection.rangeCount === 0) {
+    return null
+  }
+  const range = selection.getRangeAt(0)
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return null
+  }
+  const a = domOffset(root, range.startContainer, range.startOffset)
+  const b = domOffset(root, range.endContainer, range.endOffset)
+  return a <= b ? [a, b] : [b, a]
+}
+
+/** Replaces the paragraph's DOM with one span per styled segment. */
+function renderSegments(
+  root: HTMLElement,
+  segments: readonly TextSegment[],
+  styles: readonly TextRunAppearance[],
+  run: LaidOutTextItem,
+): void {
+  const spans = segments.map((segment) => {
+    const span = document.createElement('span')
+    span.dataset.style = String(segment.style)
+    Object.assign(span.style, segmentStyle(styles[segment.style] ?? styles[0], run))
+    span.textContent = segment.text
+    return span
+  })
+  root.replaceChildren(...spans)
+}
+
+/** Selects [start, end) of `root`'s text. */
+function selectOffsets(root: HTMLElement, start: number, end: number): void {
+  const selection = window.getSelection()
+  if (!selection) {
+    return
+  }
+  const locate = (target: number): [Node, number] => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+    let remaining = target
+    let last: Text | null = null
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const text = node as Text
+      last = text
+      if (remaining <= text.length) {
+        return [text, remaining]
+      }
+      remaining -= text.length
+    }
+    return last ? [last, last.length] : [root, 0]
+  }
+  const range = document.createRange()
+  const [startNode, startOffset] = locate(start)
+  const [endNode, endOffset] = locate(end)
+  range.setStart(startNode, startOffset)
+  range.setEnd(endNode, endOffset)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+/** Reads styled text back out of the editable paragraph. */
+function readSegments(root: HTMLElement): TextSegment[] {
+  const segments: TextSegment[] = []
+  for (const token of flattenTokens(root)) {
+    const last = segments[segments.length - 1]
+    if (last && last.style === token.style) {
+      last.text += token.text
+    } else {
+      segments.push({ text: token.text, style: token.style })
+    }
+  }
   return segments
 }
 
@@ -982,6 +1290,21 @@ function caretOffsetAt(x: number, y: number, container: HTMLElement): number | n
     }
   }
   return null
+}
+
+/** Sorts bands top-down and merges ones that overlap vertically. */
+function mergeBands(bands: { top: number; bottom: number }[]): { top: number; bottom: number }[] {
+  const sorted = [...bands].sort((a, b) => b.top - a.top)
+  const merged: { top: number; bottom: number }[] = []
+  for (const band of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && band.top >= last.bottom) {
+      last.bottom = Math.min(last.bottom, band.bottom)
+    } else {
+      merged.push({ ...band })
+    }
+  }
+  return merged
 }
 
 /** Horizontal, unrotated runs can be edited as paragraphs. */

@@ -1,10 +1,21 @@
 import { createContext, useContext } from 'react'
-import type { EditorState, TextEditSource, TextSegment } from './textEdits.ts'
+import type {
+  EditorState,
+  TextEditSource,
+  TextRunAppearance,
+  TextSegment,
+} from './textEdits.ts'
 
 export type TextEditorApi = EditorState & {
   beginEdit: (source: TextEditSource, draft: string, draftSegments?: readonly TextSegment[]) => void
-  updateDraft: (draft: string, draftSegments?: readonly TextSegment[]) => void
+  updateDraft: (
+    draft: string,
+    draftSegments?: readonly TextSegment[],
+    styles?: readonly TextRunAppearance[],
+  ) => void
   commitEdit: () => void
+  /** Applies committed edits to the PDF now, so text below a grown paragraph moves. */
+  requestReflow?: () => void
   cancelEdit: () => void
 }
 

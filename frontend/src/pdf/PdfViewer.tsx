@@ -70,6 +70,7 @@ import {
   type TextEdit,
   type TextEditSource,
   type TextSegment,
+  type TextRunAppearance,
 } from './textEdits.ts'
 import {
   placeImageBox,
@@ -214,6 +215,8 @@ type PdfViewerProps = {
   onAnnotationStateChange?: (state: AnnotationUiState) => void
   /** Ctrl+wheel or trackpad pinch over the pages asks for this scale. */
   onZoomRequest?: (scale: number) => void
+  /** A paragraph edit grew; apply edits to the PDF so later content moves. */
+  onTextReflow?: () => void
 }
 
 /** Where the pointer was, as a fraction of the scrollable content, when zoom began. */
@@ -236,6 +239,7 @@ export function PdfViewer({
   onTextEditsChange,
   onAnnotationStateChange,
   onZoomRequest,
+  onTextReflow,
 }: PdfViewerProps) {
   const history = useDocumentHistory()
   const search = useSearch()
@@ -589,11 +593,16 @@ export function PdfViewer({
     historyRef.current.commit((snapshot) => ({ ...snapshot, edits: next.edits }))
   }, [currentEdits])
 
-  const updateDraft = useCallback((draftText: string, draftSegments?: readonly TextSegment[]) => {
+  const updateDraft = useCallback((
+    draftText: string,
+    draftSegments?: readonly TextSegment[],
+    styles?: readonly TextRunAppearance[],
+  ) => {
     const next = updateTextDraft(
       { edits: currentEdits(), active: activeRef.current },
       draftText,
       draftSegments,
+      styles,
     )
     activeRef.current = next.active
     uncommittedRef.current =
@@ -930,8 +939,9 @@ export function PdfViewer({
       updateDraft,
       commitEdit,
       cancelEdit,
+      requestReflow: onTextReflow,
     }),
-    [beginEdit, cancelEdit, commitEdit, updateDraft, view.edits, shownActive],
+    [beginEdit, cancelEdit, commitEdit, onTextReflow, updateDraft, view.edits, shownActive],
   )
 
   const imageApi = useMemo<ImageApi>(

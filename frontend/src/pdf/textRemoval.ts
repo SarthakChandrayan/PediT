@@ -1,5 +1,6 @@
 import {
   PDFArray,
+  PDFContentStream,
   PDFDict,
   PDFName,
   PDFNumber,
@@ -49,7 +50,8 @@ export function removeOriginalText(
   return result.removed
 }
 
-function readPageContent(page: PDFPage): Uint8Array | null {
+/** The page's content streams, decoded and joined. Null if any cannot be read. */
+export function readPageContent(page: PDFPage): Uint8Array | null {
   const contents = page.node.get(PDFName.of('Contents'))
   if (!contents) {
     return null
@@ -73,6 +75,9 @@ function readPageContent(page: PDFPage): Uint8Array | null {
     try {
       if (stream instanceof PDFRawStream) {
         parts.push(decodePDFRawStream(stream).decode())
+      } else if (stream instanceof PDFContentStream) {
+        // Operators pdf-lib added in this session, not yet encoded.
+        parts.push(stream.getUnencodedContents())
       } else if (stream instanceof PDFStream) {
         parts.push(stream.getContents())
       } else {
@@ -96,7 +101,8 @@ function readPageContent(page: PDFPage): Uint8Array | null {
   return merged
 }
 
-function fontLookup(page: PDFPage): (name: string) => FontMetrics | null {
+/** Glyph widths for the fonts in the page's resources. */
+export function fontLookup(page: PDFPage): (name: string) => FontMetrics | null {
   const cache = new Map<string, FontMetrics | null>()
   const resources = page.node.Resources()
   const fonts = resources?.lookupMaybe(PDFName.of('Font'), PDFDict)
