@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -33,6 +34,7 @@ import {
   textRunId,
   type TextBlockLayout,
   type TextEditSource,
+  type TextSegment,
   type TextRunAppearance,
 } from './textEdits.ts'
 import { useTextEditor } from './TextEditorContext.tsx'
@@ -175,7 +177,25 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
     if (!first) {
       return null
     }
+    const styles: TextRunAppearance[] = []
+    const styleKeys: string[] = []
+    const styleOf = (appearance: TextRunAppearance): number => {
+      const key = appearanceKey(appearance)
+      const found = styleKeys.indexOf(key)
+      if (found >= 0) {
+        return found
+      }
+      styleKeys.push(key)
+      styles.push(appearance)
+      return styles.length - 1
+    }
+    const runStyles = new Map(members.map(({ id, appearance }) => [id, styleOf(appearance)]))
+    const segments: TextSegment[] = block.segments.map((segment) => ({
+      text: segment.text,
+      style: runStyles.get(segment.runId) ?? 0,
+    }))
     const layout: TextBlockLayout = {
+      styles,
       left: block.left,
       width: block.width,
       firstBaseline: block.firstBaseline,
@@ -203,16 +223,22 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
       fontName: first.appearance.pdfFontName ?? first.run.fontName,
       appearance: first.appearance,
       block: layout,
+      segments,
     }
   }
 
-  const beginBlockEdit = (block: TextBlock, draft: string, caret: number | null) => {
+  const beginBlockEdit = (
+    block: TextBlock,
+    draft: string,
+    draftSegments: readonly TextSegment[] | undefined,
+    caret: number | null,
+  ) => {
     const source = blockSource(block)
     if (!source) {
       return
     }
     setPendingCaret(caret)
-    editor.beginEdit(source, draft)
+    editor.beginEdit(source, draft, draftSegments)
   }
 
   useEffect(() => {
@@ -254,16 +280,15 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
               return null
             }
             const frame = blockFrame(block, runsById, viewport)
-            const shownAppearance =
-              (activeBlock ? editor.active?.appearance : blockEdit?.appearance) ?? appearance
             if (activeBlock && editor.active) {
+              const styles = editor.active.block?.styles ?? [appearance]
               return (
                 <BlockEditor
                   key={block.id}
                   frame={frame}
                   run={run}
-                  appearance={shownAppearance}
-                  draft={editor.active.draft}
+                  styles={styles}
+                  segments={editor.active.draftSegments ?? [{ text: editor.active.draft, style: 0 }]}
                   initialCaret={pendingCaret}
                   onDraft={editor.updateDraft}
                   onCommit={editor.commitEdit}
@@ -271,15 +296,16 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
                 />
               )
             }
+            const edited = blockEdit!
             return (
               <BlockRevision
                 key={block.id}
                 frame={frame}
                 run={run}
-                appearance={shownAppearance}
-                text={blockEdit!.editedText}
+                styles={edited.block?.styles ?? [edited.appearance ?? appearance]}
+                segments={edited.segments ?? [{ text: edited.editedText, style: 0 }]}
                 onEdit={(caret) => {
-                  beginBlockEdit(block, blockEdit!.editedText, caret)
+                  beginBlockEdit(block, edited.editedText, edited.segments, caret)
                 }}
               />
             )
@@ -313,7 +339,7 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
                 const local = caretOffsetAt(event.clientX, event.clientY, event.currentTarget)
                 const caret = local === null ? null : (block.runOffsets[id] ?? 0) + local
                 setHoveredBlock(null)
-                beginBlockEdit(block, block.text, caret)
+                beginBlockEdit(block, block.text, undefined, caret)
               }}
             />
           )
@@ -639,8 +665,8 @@ function BlockOutline({ frame }: { frame: BlockFrame }) {
 function BlockEditor({
   frame,
   run,
-  appearance,
-  draft,
+  styles,
+  segments,
   initialCaret,
   onDraft,
   onCommit,
@@ -648,84 +674,125 @@ function BlockEditor({
 }: {
   frame: BlockFrame
   run: LaidOutTextItem
-  appearance: TextRunAppearance | undefined
-  draft: string
+  styles: readonly TextRunAppearance[]
+  segments: readonly TextSegment[]
   initialCaret: number | null
-  onDraft: (draft: string) => void
+  onDraft: (draft: string, draftSegments: readonly TextSegment[]) => void
   onCommit: () => void
   onCancel: () => void
 }) {
-  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const editorRef = useRef<HTMLDivElement>(null)
   const ignoreBlur = useRef(false)
   const [overflow, setOverflow] = useState(false)
-  const caretRef = useRef(initialCaret)
+  // Rendered once: after mount the browser owns the DOM, and every change is
+  // read back from it. Re-rendering the spans would reset the caret.
+  const [initial] = useState(() => ({ segments, caret: initialCaret }))
+
+  const measure = useCallback(() => {
+    const element = editorRef.current
+    if (element) {
+      setOverflow(element.scrollHeight > frame.coverHeight + frame.lineHeight * 0.5)
+    }
+  }, [frame.coverHeight, frame.lineHeight])
 
   useEffect(() => {
-    const input = inputRef.current
-    if (!input) {
+    const element = editorRef.current
+    if (!element) {
       return
     }
-    input.focus({ preventScroll: true })
-    const caret = caretRef.current ?? input.value.length
-    const clamped = Math.min(Math.max(caret, 0), input.value.length)
-    input.setSelectionRange(clamped, clamped)
-  }, [])
+    element.focus({ preventScroll: true })
+    const total = element.textContent?.length ?? 0
+    placeCaret(element, Math.min(Math.max(initial.caret ?? total, 0), total))
+    measure()
+  }, [initial.caret, measure])
 
-  useLayoutEffect(() => {
-    const input = inputRef.current
-    if (!input) {
+  const emit = () => {
+    const element = editorRef.current
+    if (!element) {
       return
     }
-    // Grow with the text like a word-processor paragraph.
-    input.style.height = 'auto'
-    input.style.height = `${Math.max(input.scrollHeight, frame.coverHeight)}px`
-    setOverflow(input.scrollHeight > frame.coverHeight + frame.lineHeight * 0.5)
-  }, [draft, frame.coverHeight, frame.lineHeight])
+    const next = readSegments(element)
+    onDraft(next.map((segment) => segment.text).join(''), next)
+    measure()
+  }
 
-  const style = blockStyle(frame, run, appearance)
+  const base = styles[0]
   return (
     <>
-    <textarea
-      ref={inputRef}
-      className="text-block text-block--editing"
-      data-overflow={overflow ? 'true' : undefined}
-      style={style}
-      value={draft}
-      aria-label="Edit paragraph"
-      aria-describedby={overflow ? 'block-overflow-note' : undefined}
-      spellCheck
-      autoComplete="off"
-      onChange={(event) => {
-        onDraft(event.target.value)
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape') {
+      <div
+        ref={editorRef}
+        className="text-block text-block--editing"
+        data-overflow={overflow ? 'true' : undefined}
+        style={blockStyle(frame, run, base)}
+        contentEditable
+        suppressContentEditableWarning
+        role="textbox"
+        aria-multiline="true"
+        aria-label="Edit paragraph"
+        aria-describedby={overflow ? 'block-overflow-note' : undefined}
+        spellCheck
+        onInput={emit}
+        onBeforeInput={(event) => {
+          // Formatting would add tags the PDF writer cannot express.
+          const type = (event.nativeEvent as InputEvent).inputType
+          if (type?.startsWith('format')) {
+            event.preventDefault()
+          }
+        }}
+        onPaste={(event) => {
           event.preventDefault()
-          event.stopPropagation()
-          ignoreBlur.current = true
-          onCancel()
-        } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+          const text = event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n')
+          insertPlainText(text)
+          emit()
+        }}
+        onDrop={(event) => {
           event.preventDefault()
+        }}
+        onKeyDown={(event) => {
+          const meta = event.ctrlKey || event.metaKey
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            event.stopPropagation()
+            ignoreBlur.current = true
+            onCancel()
+          } else if (event.key === 'Enter' && meta) {
+            event.preventDefault()
+            onCommit()
+          } else if (event.key === 'Enter') {
+            event.preventDefault()
+            insertPlainText('\n')
+            emit()
+          } else if (meta && ['b', 'i', 'u'].includes(event.key.toLowerCase())) {
+            event.preventDefault()
+          }
+        }}
+        onBlur={() => {
+          if (ignoreBlur.current) {
+            ignoreBlur.current = false
+            return
+          }
           onCommit()
-        }
-      }}
-      onBlur={() => {
-        if (ignoreBlur.current) {
-          ignoreBlur.current = false
-          return
-        }
-        onCommit()
-      }}
-    />
-    {overflow ? (
-      <p
-        id="block-overflow-note"
-        className="text-block-note"
-        style={{ left: `${frame.left}px`, top: `${frame.top - 30}px` }}
+        }}
       >
-        Text runs past the original paragraph and may overlap what's below.
-      </p>
-    ) : null}
+        {initial.segments.map((segment, index) => (
+          <span
+            key={index}
+            data-style={segment.style}
+            style={segmentStyle(styles[segment.style] ?? base, run)}
+          >
+            {segment.text}
+          </span>
+        ))}
+      </div>
+      {overflow ? (
+        <p
+          id="block-overflow-note"
+          className="text-block-note"
+          style={{ left: `${frame.left}px`, top: `${frame.top - 30}px` }}
+        >
+          Text runs past the original paragraph and may overlap what's below.
+        </p>
+      ) : null}
     </>
   )
 }
@@ -733,20 +800,21 @@ function BlockEditor({
 function BlockRevision({
   frame,
   run,
-  appearance,
-  text,
+  styles,
+  segments,
   onEdit,
 }: {
   frame: BlockFrame
   run: LaidOutTextItem
-  appearance: TextRunAppearance | undefined
-  text: string
+  styles: readonly TextRunAppearance[]
+  segments: readonly TextSegment[]
   onEdit: (caret: number | null) => void
 }) {
+  const base = styles[0]
   return (
     <div
       className="text-block text-block--revised"
-      style={blockStyle(frame, run, appearance)}
+      style={blockStyle(frame, run, base)}
       role="button"
       tabIndex={0}
       aria-label="Edited paragraph. Click to edit."
@@ -760,9 +828,124 @@ function BlockRevision({
         }
       }}
     >
-      {text}
+      {segments.map((segment, index) => (
+        <span key={index} style={segmentStyle(styles[segment.style] ?? base, run)}>
+          {segment.text}
+        </span>
+      ))}
     </div>
   )
+}
+
+function segmentStyle(appearance: TextRunAppearance | undefined, run: LaidOutTextItem): CSSProperties {
+  const face = replacementFontCss(appearance, run.fontFamily)
+  // Explicit, so a regular piece never inherits the paragraph's bold base.
+  return {
+    fontFamily: face.fontFamily,
+    fontWeight: face.fontWeight ?? 400,
+    fontStyle: face.fontStyle ?? 'normal',
+    color: appearance?.color ? cssColor(appearance.color) : undefined,
+  }
+}
+
+function appearanceKey(appearance: TextRunAppearance): string {
+  const color = appearance.color
+  return [
+    appearance.pdfFontName ?? '',
+    appearance.loadedName ?? '',
+    appearance.bold ? 'b' : '',
+    appearance.italic ? 'i' : '',
+    color ? `${color.r.toFixed(3)},${color.g.toFixed(3)},${color.b.toFixed(3)}` : '',
+  ].join('|')
+}
+
+/** Reads styled text back out of the editable paragraph. */
+function readSegments(root: HTMLElement): TextSegment[] {
+  const segments: TextSegment[] = []
+  const push = (text: string, style: number) => {
+    if (text.length === 0) {
+      return
+    }
+    const last = segments[segments.length - 1]
+    if (last && last.style === style) {
+      last.text += text
+    } else {
+      segments.push({ text, style })
+    }
+  }
+  const walk = (node: Node, style: number) => {
+    node.childNodes.forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        push(child.textContent ?? '', style)
+        return
+      }
+      if (!(child instanceof HTMLElement)) {
+        return
+      }
+      if (child.tagName === 'BR') {
+        push('\n', style)
+        return
+      }
+      const own = child.dataset.style
+      const childStyle = own !== undefined && Number.isFinite(Number(own)) ? Number(own) : style
+      const isBlock = child.tagName === 'DIV' || child.tagName === 'P'
+      const text = segments.map((segment) => segment.text).join('')
+      if (isBlock && text.length > 0 && !text.endsWith('\n')) {
+        push('\n', childStyle)
+      }
+      walk(child, childStyle)
+    })
+  }
+  walk(root, 0)
+  return segments
+}
+
+/** Inserts text at the caret as the browser would, keeping undo history. */
+function insertPlainText(text: string): void {
+  if (text.length === 0) {
+    return
+  }
+  // execCommand is deprecated but remains the only way to keep native undo.
+  if (document.execCommand('insertText', false, text)) {
+    return
+  }
+  const selection = window.getSelection()
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null
+  if (!selection || !range) {
+    return
+  }
+  range.deleteContents()
+  const node = document.createTextNode(text)
+  range.insertNode(node)
+  range.setStartAfter(node)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+/** Puts the caret `offset` characters into `root`'s text. */
+function placeCaret(root: HTMLElement, offset: number): void {
+  const selection = window.getSelection()
+  if (!selection) {
+    return
+  }
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  let remaining = offset
+  let last: Text | null = null
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const text = node as Text
+    last = text
+    if (remaining <= text.length) {
+      selection.collapse(text, remaining)
+      return
+    }
+    remaining -= text.length
+  }
+  if (last) {
+    selection.collapse(last, last.length)
+  } else {
+    selection.collapse(root, 0)
+  }
 }
 
 /** Character offset of the point within `container`'s text, or null. */

@@ -69,6 +69,7 @@ import {
   type ActiveTextEdit,
   type TextEdit,
   type TextEditSource,
+  type TextSegment,
 } from './textEdits.ts'
 import {
   placeImageBox,
@@ -571,12 +572,16 @@ export function PdfViewer({
 
   const currentEdits = useCallback(() => historyRef.current.getView().edits, [])
 
-  const beginEdit = useCallback((source: TextEditSource, draftText: string) => {
+  const beginEdit = useCallback((
+    source: TextEditSource,
+    draftText: string,
+    draftSegments?: readonly TextSegment[],
+  ) => {
     const current = { edits: currentEdits(), active: activeRef.current }
     if (current.active?.id === source.id) {
       return
     }
-    const next = beginTextEdit(current, source, draftText)
+    const next = beginTextEdit(current, source, draftText, draftSegments)
     activeRef.current = next.active
     uncommittedRef.current =
       next.active !== null && next.active.draft !== next.active.originalText
@@ -584,10 +589,11 @@ export function PdfViewer({
     historyRef.current.commit((snapshot) => ({ ...snapshot, edits: next.edits }))
   }, [currentEdits])
 
-  const updateDraft = useCallback((draftText: string) => {
+  const updateDraft = useCallback((draftText: string, draftSegments?: readonly TextSegment[]) => {
     const next = updateTextDraft(
       { edits: currentEdits(), active: activeRef.current },
       draftText,
+      draftSegments,
     )
     activeRef.current = next.active
     uncommittedRef.current =

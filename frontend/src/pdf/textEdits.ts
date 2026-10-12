@@ -25,6 +25,9 @@ export type TextRunAppearance = {
   vertical: boolean
 }
 
+/** Text in one style; `style` indexes `TextBlockLayout.styles`. */
+export type TextSegment = { text: string; style: number }
+
 /** One original text run covered by a paragraph edit. PDF user space. */
 export type TextBlockMember = {
   pdfX: number
@@ -48,6 +51,8 @@ export type TextBlockLayout = {
   fontSize: number
   indent: number
   members: readonly TextBlockMember[]
+  /** Distinct text styles in the paragraph, in first-seen order. */
+  styles: readonly TextRunAppearance[]
 }
 
 /**
@@ -71,6 +76,8 @@ export type TextEdit = {
   appearance?: TextRunAppearance
   /** Present when the edit replaces a whole paragraph rather than one run. */
   block?: TextBlockLayout
+  /** Styled form of `editedText` for paragraph edits. Joined, equals it. */
+  segments?: readonly TextSegment[]
 }
 
 export type TextEditSource = {
@@ -85,10 +92,14 @@ export type TextEditSource = {
   fontName?: string
   appearance?: TextRunAppearance
   block?: TextBlockLayout
+  /** Styled form of `originalText` for paragraphs. */
+  segments?: readonly TextSegment[]
 }
 
 export type ActiveTextEdit = TextEditSource & {
   draft: string
+  /** Styled form of `draft` for paragraphs. */
+  draftSegments?: readonly TextSegment[]
   transform: number[]
 }
 
@@ -109,6 +120,7 @@ export function beginTextEdit(
   state: EditorState,
   source: TextEditSource,
   draft: string,
+  draftSegments?: readonly TextSegment[],
 ): EditorState {
   if (state.active?.id === source.id) {
     return state
@@ -121,19 +133,24 @@ export function beginTextEdit(
       ...source,
       appearance: copyAppearance(source.appearance),
       draft,
+      draftSegments: draftSegments ?? source.segments,
       transform: [...source.transform],
     },
   }
 }
 
-export function updateTextDraft(state: EditorState, draft: string): EditorState {
-  if (!state.active || state.active.draft === draft) {
+export function updateTextDraft(
+  state: EditorState,
+  draft: string,
+  draftSegments?: readonly TextSegment[],
+): EditorState {
+  if (!state.active || (state.active.draft === draft && draftSegments === undefined)) {
     return state
   }
 
   return {
     edits: state.edits,
-    active: { ...state.active, draft },
+    active: { ...state.active, draft, draftSegments: draftSegments ?? state.active.draftSegments },
   }
 }
 
@@ -162,6 +179,7 @@ export function commitTextEdit(state: EditorState): EditorState {
             fontName: active.fontName,
             appearance: copyAppearance(active.appearance),
             block: active.block,
+            segments: active.block ? active.draftSegments : undefined,
           },
         ]
 

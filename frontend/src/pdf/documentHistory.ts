@@ -495,12 +495,25 @@ function sameEdits(left: readonly TextEdit[], right: readonly TextEdit[]): boole
       a.fontName !== b.fontName ||
       !sameNumbers(a.transform, b.transform) ||
       !sameAppearance(a.appearance, b.appearance) ||
-      !sameBlock(a.block, b.block)
+      !sameBlock(a.block, b.block) ||
+      !sameSegments(a.segments, b.segments)
     ) {
       return false
     }
   }
   return true
+}
+
+function sameSegments(left: TextEdit['segments'], right: TextEdit['segments']): boolean {
+  if (left === right) {
+    return true
+  }
+  if (!left || !right || left.length !== right.length) {
+    return false
+  }
+  return left.every(
+    (segment, index) => segment.text === right[index]!.text && segment.style === right[index]!.style,
+  )
 }
 
 function sameBlock(left: TextEdit['block'], right: TextEdit['block']): boolean {

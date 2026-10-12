@@ -1,9 +1,9 @@
 import { createContext, useContext } from 'react'
-import type { EditorState, TextEditSource } from './textEdits.ts'
+import type { EditorState, TextEditSource, TextSegment } from './textEdits.ts'
 
 export type TextEditorApi = EditorState & {
-  beginEdit: (source: TextEditSource, draft: string) => void
-  updateDraft: (draft: string) => void
+  beginEdit: (source: TextEditSource, draft: string, draftSegments?: readonly TextSegment[]) => void
+  updateDraft: (draft: string, draftSegments?: readonly TextSegment[]) => void
   commitEdit: () => void
   cancelEdit: () => void
 }

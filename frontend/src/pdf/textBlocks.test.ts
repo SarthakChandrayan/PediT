@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { groupTextBlocks, wrapParagraphText, type BlockRunInput } from './textBlocks.ts'
+import {
+  groupTextBlocks,
+  wrapParagraphText,
+  wrapStyledText,
+  type BlockRunInput,
+} from './textBlocks.ts'
 
 let counter = 0
 function run(str: string, x: number, baseline: number, width: number, fontSize = 12): BlockRunInput {
@@ -16,6 +21,16 @@ describe('groupTextBlocks', () => {
     ])
     expect(blocks).toHaveLength(1)
     expect(blocks[0]!.text).toBe('Amount due today')
+  })
+
+  it('adds a space after a label even when the measured gap is tiny', () => {
+    const blocks = groupTextBlocks([run('Tools:', 72, 700, 36), run('AWS, Git', 108.6, 700, 50)])
+    expect(blocks[0]!.text).toBe('Tools: AWS, Git')
+  })
+
+  it('does not split a decimal number', () => {
+    const blocks = groupTextBlocks([run('3.', 72, 700, 9), run('14', 81.5, 700, 12)])
+    expect(blocks[0]!.text).toBe('3.14')
   })
 
   it('does not insert a space between touching fragments of one word', () => {
@@ -84,12 +99,60 @@ describe('groupTextBlocks', () => {
     ])
   })
 
+  it('breaks the line when a full line is followed by one starting in another style', () => {
+    // A "Label: values" list where every line starts with a bold label.
+    const runs = [
+      { ...run('AI:', 72, 700, 18), fontKey: 'bold' },
+      { ...run('LangChain, Retrieval-Augmented Generation, Vector Embeddings', 93, 700, 300), fontKey: 'regular' },
+      { ...run('Cloud:', 72, 686, 36), fontKey: 'bold' },
+      { ...run('AWS, Git, Postman, Jira, Figma, Mixpanel, Vercel', 111, 686, 250), fontKey: 'regular' },
+    ]
+    const [block] = groupTextBlocks(runs)
+    expect(block!.text).toBe(
+      'AI: LangChain, Retrieval-Augmented Generation, Vector Embeddings\nCloud: AWS, Git, Postman, Jira, Figma, Mixpanel, Vercel',
+    )
+  })
+
+  it('splits the paragraph text by source run', () => {
+    const label = { ...run('Languages:', 72, 700, 60), fontKey: 'bold' }
+    const value = { ...run('TypeScript, Python', 135, 700, 100), fontKey: 'regular' }
+    const [block] = groupTextBlocks([label, value])
+    expect(block!.segments).toEqual([
+      { runId: label.id, text: 'Languages: ' },
+      { runId: value.id, text: 'TypeScript, Python' },
+    ])
+    expect(block!.segments.map((segment) => segment.text).join('')).toBe(block!.text)
+  })
+
   it('keeps list items on their own lines', () => {
     const blocks = groupTextBlocks([
       run('• Fast delivery on all orders placed', 72, 700, 300),
       run('• Free returns within thirty days', 72, 686, 300),
     ])
     expect(blocks[0]!.text).toBe('• Fast delivery on all orders placed\n• Free returns within thirty days')
+  })
+})
+
+describe('wrapStyledText', () => {
+  it('wraps across styles and keeps each piece in its style', () => {
+    // Bold glyphs are twice as wide.
+    const measure = (text: string, style: number) => text.length * (style === 1 ? 2 : 1)
+    const lines = wrapStyledText(
+      [
+        { text: 'Lang: ', style: 1 },
+        { text: 'ts js py', style: 0 },
+      ],
+      14,
+      0,
+      measure,
+    )
+    expect(lines).toEqual([
+      [
+        { text: 'Lang: ', style: 1 },
+        { text: 'ts', style: 0 },
+      ],
+      [{ text: 'js py', style: 0 }],
+    ])
   })
 })
 

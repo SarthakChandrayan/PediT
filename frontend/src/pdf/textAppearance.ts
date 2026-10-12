@@ -248,20 +248,54 @@ export function replacementFontCss(
   appearance: TextRunAppearance | undefined,
   runFamily?: string,
 ): { fontFamily: string; fontWeight?: number; fontStyle?: 'italic' } {
-  const standard = cssFontFamily(resolveStandardFont(appearance))
+  const resolved = resolveStandardFont(appearance)
+  const standard = cssFontFamily(resolved)
   const loaded = appearance?.loadedName?.trim()
-  if (loaded) {
+  if (loaded && isLoadedFontFace(loaded)) {
+    // The PDF's own glyphs: already bold or italic if the original was.
     return { fontFamily: `"${loaded}", ${standard}` }
   }
+  // Without the PDF's own face, weight and slant must come from CSS, whether
+  // the family is the run's ("Helvetica") or a standard substitute.
+  const weight = appearance?.bold || fontIsBold(resolved) ? 700 : undefined
+  const slant = appearance?.italic || fontIsItalic(resolved) ? ('italic' as const) : undefined
   const run = runFamily?.trim()
   if (run && run !== 'sans-serif' && run !== 'serif' && run !== 'monospace') {
-    return { fontFamily: `${run}, ${standard}` }
+    return { fontFamily: `${run}, ${standard}`, fontWeight: weight, fontStyle: slant }
   }
-  return {
-    fontFamily: standard,
-    fontWeight: appearance?.bold ? 700 : undefined,
-    fontStyle: appearance?.italic ? 'italic' : undefined,
+  return { fontFamily: standard, fontWeight: weight, fontStyle: slant }
+}
+
+const fontFaceCache = new Map<string, boolean>()
+
+/**
+ * PDF.js registers embedded fonts as FontFaces under generated names. For
+ * standard fonts that are not embedded, `loadedName` is just a family such as
+ * "Helvetica" with no face behind it, so weight must still come from CSS.
+ */
+function isLoadedFontFace(family: string): boolean {
+  // PDF.js names the faces it registers for embedded fonts "g_d<doc>_f<font>".
+  if (/^g_d\d+_f\d+$/.test(family)) {
+    return true
   }
+  if (typeof document === 'undefined' || !document.fonts) {
+    return false
+  }
+  const cached = fontFaceCache.get(family)
+  if (cached) {
+    return true
+  }
+  let found = false
+  document.fonts.forEach((face) => {
+    if (face.family.replace(/^["']|["']$/g, '') === family) {
+      found = true
+    }
+  })
+  // Only cache hits: faces can still be registering when first asked.
+  if (found) {
+    fontFaceCache.set(family, true)
+  }
+  return found
 }
 
 export function samePdfFontName(left: string | undefined, right: string | undefined): boolean {

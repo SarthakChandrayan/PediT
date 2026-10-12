@@ -30,8 +30,13 @@ import { resolveNewTextFont, type NewTextAnnotation } from './newTexts.ts'
 import { embedOriginalFont } from './originalFont.ts'
 import { pngDataUrlToBytes, type SignatureAnnotation } from './placedSignatures.ts'
 import { horizontalFitFactor, resolveStandardFont } from './textAppearance.ts'
-import type { TextBlockLayout, TextEdit } from './textEdits.ts'
-import { BLOCK_WRAP_SLACK, wrapParagraphText } from './textBlocks.ts'
+import type {
+  TextBlockLayout,
+  TextEdit,
+  TextRunAppearance,
+  TextSegment,
+} from './textEdits.ts'
+import { BLOCK_WRAP_SLACK, wrapStyledText } from './textBlocks.ts'
 import type { Region } from './contentStream.ts'
 import { removeOriginalText } from './textRemoval.ts'
 
@@ -176,27 +181,46 @@ export async function exportEditedPdf(
         `A text edit refers to page ${edit.pageNumber}, which is not in this PDF.`,
       )
     }
-    const original = await embedOriginalFont(
-      pdf,
-      page,
-      edit.appearance?.pdfFontName ?? edit.fontName,
-      originalFonts,
-    )
-    const standard = resolveStandardFont(edit.appearance)
-    // Embedded fonts are usually subsets; new characters need a full font.
-    let font = original && (!edit.block || fontHasGlyphs(original, edit.editedText)) ? original : null
-    if (!font) {
-      font = fonts.get(standard) ?? null
+    const pageMarkups = highlights.filter((markup) => markup.pageNumber === edit.pageNumber)
+    const fontFor = async (
+      appearance: TextRunAppearance | undefined,
+      fallbackName: string | undefined,
+      text: string | null,
+    ): Promise<PDFFont> => {
+      const original = await embedOriginalFont(
+        pdf,
+        page,
+        appearance?.pdfFontName ?? fallbackName,
+        originalFonts,
+      )
+      // Embedded fonts are usually subsets; new characters need a full font.
+      if (original && (text === null || fontHasGlyphs(original, text))) {
+        return original
+      }
+      const standard = resolveStandardFont(appearance)
+      let font = fonts.get(standard)
       if (!font) {
         font = await pdf.embedFont(standard)
         fonts.set(standard, font)
       }
+      return font
     }
-    const pageMarkups = highlights.filter((markup) => markup.pageNumber === edit.pageNumber)
+
     if (edit.block) {
-      applyBlockEdit(page, font, edit, edit.block, pageMarkups)
+      const block = edit.block
+      const segments = edit.segments ?? [{ text: edit.editedText, style: 0 }]
+      const styles = block.styles.length > 0 ? block.styles : [edit.appearance]
+      const styleFonts: PDFFont[] = []
+      for (let index = 0; index < styles.length; index += 1) {
+        const text = segments
+          .filter((segment) => segment.style === index)
+          .map((segment) => segment.text)
+          .join('')
+        styleFonts.push(await fontFor(styles[index], edit.fontName, text))
+      }
+      applyBlockEdit(page, styleFonts, styles, edit, block, segments, pageMarkups)
     } else {
-      applyTextEdit(page, font, edit, pageMarkups)
+      applyTextEdit(page, await fontFor(edit.appearance, edit.fontName, null), edit, pageMarkups)
     }
   }
 
@@ -283,9 +307,11 @@ function applyTextEdit(
  */
 function applyBlockEdit(
   page: PDFPage,
-  font: PDFFont,
+  styleFonts: readonly PDFFont[],
+  styles: readonly (TextRunAppearance | undefined)[],
   edit: TextEdit,
   block: TextBlockLayout,
+  segments: readonly TextSegment[],
   highlights: readonly TextMarkup[],
 ): void {
   for (const member of block.members) {
@@ -311,10 +337,13 @@ function applyBlockEdit(
     edit.appearance?.horizontalScale && edit.appearance.horizontalScale > 0
       ? edit.appearance.horizontalScale
       : 1
-  const measure = (value: string) =>
-    font.widthOfTextAtSize(textForStandardFont(font, value), fontSize) * scale
-  const lines = wrapParagraphText(
-    edit.editedText,
+  const fontOf = (style: number) => styleFonts[style] ?? styleFonts[0]!
+  const measure = (value: string, style: number) => {
+    const font = fontOf(style)
+    return font.widthOfTextAtSize(textForStandardFont(font, value), fontSize) * scale
+  }
+  const lines = wrapStyledText(
+    segments,
     block.width * BLOCK_WRAP_SLACK + 0.5,
     block.indent,
     measure,
@@ -329,17 +358,22 @@ function applyBlockEdit(
     setTextRise(0),
   )
   lines.forEach((line, index) => {
-    const text = textForStandardFont(font, line)
-    if (text.trim().length === 0) {
-      return
+    let x = block.left + (index === 0 ? block.indent : 0)
+    const y = block.firstBaseline - index * block.lineHeight
+    for (const piece of line) {
+      const font = fontOf(piece.style)
+      const text = textForStandardFont(font, piece.text)
+      if (text.trim().length > 0) {
+        page.drawText(text, {
+          x,
+          y,
+          size: fontSize,
+          font,
+          color: appearanceColor(styles[piece.style] ?? edit.appearance),
+        })
+      }
+      x += measure(piece.text, piece.style)
     }
-    page.drawText(text, {
-      x: block.left + (index === 0 ? block.indent : 0),
-      y: block.firstBaseline - index * block.lineHeight,
-      size: fontSize,
-      font,
-      color: editColor(edit),
-    })
   })
   page.pushOperators(popGraphicsState())
 }
@@ -440,6 +474,16 @@ function exportHorizontalFit(
   }
   const natural = font.widthOfTextAtSize(text, fontSize) * (scaleX / fontSize)
   return horizontalFitFactor(natural, originalWidth, vertical)
+}
+
+function appearanceColor(appearance: TextRunAppearance | undefined) {
+  const color = appearance?.color
+  if (!color) {
+    return TEXT_COLOR
+  }
+  const channel = (value: number) =>
+    Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0
+  return rgb(channel(color.r), channel(color.g), channel(color.b))
 }
 
 function editColor(edit: TextEdit) {

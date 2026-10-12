@@ -37,6 +37,11 @@ export type TextBlock = {
   text: string
   /** Where each run's first character sits in `text`. */
   runOffsets: Record<string, number>
+  /**
+   * `text` split by source run, in order; joined they equal `text`. Spaces and
+   * line breaks added between runs belong to the run before them.
+   */
+  segments: { runId: string; text: string }[]
   lines: TextBlockLine[]
   left: number
   width: number
@@ -154,7 +159,20 @@ function needsSpace(previous: BlockRunInput, next: BlockRunInput, soFar: string)
     return false
   }
   const gap = next.x - (previous.x + previous.width)
-  return gap > WORD_GAP * Math.max(previous.fontSize, next.fontSize)
+  const em = Math.max(previous.fontSize, next.fontSize)
+  if (gap > WORD_GAP * em) {
+    return true
+  }
+  // "Tools:" then "AWS": run widths are often measured a little wide, so after
+  // punctuation even a small gap before a letter is a word space.
+  if (!(gap > 0.02 * em)) {
+    return false
+  }
+  if (/\.$/.test(previous.str)) {
+    // "3." + "14" is a number; "end." + "Next" is a new sentence.
+    return /^\p{L}/u.test(next.str)
+  }
+  return /[:;,!?)\]]$/.test(previous.str) && /^[\p{L}\p{N}(]/u.test(next.str)
 }
 
 function buildBlocks(lines: WorkingLine[], runs: readonly BlockRunInput[]): TextBlock[] {
@@ -222,20 +240,38 @@ function toBlock(group: WorkingLine[]): TextBlock {
 
   let text = ''
   const runOffsets: Record<string, number> = {}
+  const segments: { runId: string; text: string }[] = []
+  const append = (value: string) => {
+    text += value
+    const last = segments[segments.length - 1]
+    if (last) {
+      last.text += value
+    }
+  }
   group.forEach((line, lineIndex) => {
     if (lineIndex > 0) {
-      text += lineBreak(group[lineIndex - 1]!, line, right, width, fontSize, text)
+      append(lineBreak(group[lineIndex - 1]!, line, right, width, fontSize, text))
     }
     let previous: BlockRunInput | null = null
     for (const run of line.runs) {
       if (previous && needsSpace(previous, run, text)) {
-        text += ' '
+        append(' ')
       }
       runOffsets[run.id] = text.length
       text += run.str
+      segments.push({ runId: run.id, text: run.str })
       previous = run
     }
-    text = text.replace(/[ \t]+$/, '')
+    // Drop trailing spaces at the end of the line from both views.
+    const trimmed = text.replace(/[ \t]+$/, '')
+    let excess = text.length - trimmed.length
+    text = trimmed
+    for (let index = segments.length - 1; index >= 0 && excess > 0; index -= 1) {
+      const segment = segments[index]!
+      const cut = Math.min(excess, segment.text.length)
+      segment.text = segment.text.slice(0, segment.text.length - cut)
+      excess -= cut
+    }
   })
 
   return {
@@ -243,6 +279,7 @@ function toBlock(group: WorkingLine[]): TextBlock {
     runIds: group.flatMap((line) => line.runIds),
     text,
     runOffsets,
+    segments: segments.filter((segment) => segment.text.length > 0),
     lines: group.map(({ runIds, left: l, right: r, baseline, text: t }) => ({
       runIds,
       left: l,
@@ -275,7 +312,12 @@ function lineBreak(
 ): string {
   const short = right - previous.right > Math.max(3 * fontSize, 0.18 * width)
   const listItem = /^\s*([•\-–·*]|\d+[.)]|[a-z][.)])\s/i.test(next.text)
-  if (short || /:\s*$/.test(previous.text) || listItem) {
+  // A wrapped line continues in the style it ended in. A line that starts in
+  // another style ("Label:" in bold after regular text) is a new line.
+  const endFont = previous.runs[previous.runs.length - 1]?.fontKey
+  const startFont = next.runs[0]?.fontKey
+  const styleChange = endFont !== undefined && startFont !== undefined && endFont !== startFont
+  if (short || styleChange || /:\s*$/.test(previous.text) || listItem) {
     return '\n'
   }
   if (/-$/.test(soFar)) {
@@ -296,47 +338,126 @@ function median(values: number[]): number {
     : (sorted[middle - 1]! + sorted[middle]!) / 2
 }
 
+/** A run of text in one style; `style` indexes the block's style list. */
+export type StyledPiece = { text: string; style: number }
+
 /**
- * Greedy word wrap for export. `measure` returns a string's advance width in
- * the same units as `width`. Explicit "\n" always breaks; a word longer than
- * the line is split by characters.
+ * Greedy word wrap for styled text. `measure` returns the advance width of a
+ * string in a style, in the same units as `width`. Explicit "\n" always
+ * breaks; a word longer than the line is split by characters.
  */
+export function wrapStyledText(
+  pieces: readonly StyledPiece[],
+  width: number,
+  firstLineIndent: number,
+  measure: (text: string, style: number) => number,
+): StyledPiece[][] {
+  type Char = { char: string; style: number }
+  const chars: Char[] = []
+  for (const piece of pieces) {
+    for (const char of piece.text) {
+      chars.push({ char: char === '\r' ? '\n' : char, style: piece.style })
+    }
+  }
+
+  const lines: Char[][] = []
+  const available = () => width - (lines.length === 0 ? firstLineIndent : 0)
+  const widthOf = (items: readonly Char[]) => measureChars(items, measure)
+
+  let paragraph: Char[] = []
+  const paragraphs: Char[][] = []
+  for (const item of chars) {
+    if (item.char === '\n') {
+      paragraphs.push(paragraph)
+      paragraph = []
+    } else {
+      paragraph.push(item)
+    }
+  }
+  paragraphs.push(paragraph)
+
+  for (const items of paragraphs) {
+    // Words keep the space before them so a line can drop it when wrapping.
+    const words: { space: Char[]; word: Char[] }[] = []
+    let space: Char[] = []
+    let word: Char[] = []
+    for (const item of items) {
+      if (item.char === ' ') {
+        if (word.length > 0) {
+          words.push({ space, word })
+          space = []
+          word = []
+        }
+        space.push(item)
+      } else {
+        word.push(item)
+      }
+    }
+    if (word.length > 0 || words.length === 0) {
+      words.push({ space, word })
+    }
+
+    let current: Char[] = []
+    for (const entry of words) {
+      if (current.length > 0) {
+        const candidate = [...current, ...entry.space, ...entry.word]
+        if (widthOf(candidate) <= available()) {
+          current = candidate
+          continue
+        }
+        lines.push(current)
+        current = []
+      }
+      // Leading spaces only survive at the start of a paragraph.
+      const lead = current.length === 0 && entry === words[0] ? entry.space : []
+      const start = [...lead, ...entry.word]
+      if (widthOf(start) <= available() || entry.word.length <= 1) {
+        current = start
+        continue
+      }
+      // Split an over-long word so it never runs past the paragraph edge.
+      for (const item of start) {
+        if (current.length > 0 && widthOf([...current, item]) > available()) {
+          lines.push(current)
+          current = []
+        }
+        current.push(item)
+      }
+    }
+    lines.push(current)
+  }
+
+  return lines.map((line) => mergePieces(line))
+}
+
+function measureChars(
+  items: readonly { char: string; style: number }[],
+  measure: (text: string, style: number) => number,
+): number {
+  return mergePieces(items).reduce((total, piece) => total + measure(piece.text, piece.style), 0)
+}
+
+function mergePieces(items: readonly { char: string; style: number }[]): StyledPiece[] {
+  const merged: StyledPiece[] = []
+  for (const item of items) {
+    const last = merged[merged.length - 1]
+    if (last && last.style === item.style) {
+      last.text += item.char
+    } else {
+      merged.push({ text: item.char, style: item.style })
+    }
+  }
+  return merged
+}
+
+/** Plain-text form of `wrapStyledText`. */
 export function wrapParagraphText(
   text: string,
   width: number,
   firstLineIndent: number,
   measure: (value: string) => number,
 ): string[] {
-  const lines: string[] = []
-  const paragraphs = text.split(/\r?\n/)
-  paragraphs.forEach((paragraph, paragraphIndex) => {
-    const available = () => width - (lines.length === 0 && paragraphIndex === 0 ? firstLineIndent : 0)
-    const words = paragraph.split(/ +/)
-    let current = ''
-    for (const word of words) {
-      if (current.length > 0) {
-        const candidate = `${current} ${word}`
-        if (measure(candidate) <= available()) {
-          current = candidate
-          continue
-        }
-        lines.push(current)
-        current = ''
-      }
-      if (measure(word) <= available() || word.length <= 1) {
-        current = word
-        continue
-      }
-      // Split an over-long word so it never runs past the paragraph edge.
-      for (const char of word) {
-        if (current.length > 0 && measure(current + char) > available()) {
-          lines.push(current)
-          current = ''
-        }
-        current += char
-      }
-    }
-    lines.push(current)
-  })
-  return lines
+  return wrapStyledText([{ text, style: 0 }], width, firstLineIndent, (value) => measure(value)).map(
+    (line) => line.map((piece) => piece.text).join(''),
+  )
 }
