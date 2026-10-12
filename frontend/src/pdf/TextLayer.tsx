@@ -237,6 +237,7 @@ export function TextLayer({ pdf, pageNumber, viewport }: TextLayerProps) {
       lineHeight: block.lineHeight,
       fontSize: block.fontSize,
       indent: block.indent,
+      hang: block.hang,
       members: members.map(({ run, appearance }) => ({
         pdfX: run.pdfOrigin.x,
         pdfY: run.pdfOrigin.y,
@@ -647,6 +648,8 @@ type BlockFrame = {
   fontSize: number
   lineHeight: number
   indent: number
+  /** List text start and tab stop; 0 when the block is not a list. */
+  hang: number
   /** Distance from `top` to the first baseline. */
   baseline: number
 }
@@ -685,6 +688,7 @@ function blockFrame(
     fontSize,
     lineHeight,
     indent: block.indent * scale,
+    hang: block.hang * scale,
     baseline: origin.y - frameTop,
   }
 }
@@ -707,7 +711,15 @@ function blockStyle(
     // text that runs past it shows over whatever is below.
     background: `linear-gradient(#fff ${frame.coverHeight}px, transparent ${frame.coverHeight}px)`,
     paddingTop: `${Math.max(0, frame.baseline - baselineInLine)}px`,
-    textIndent: `${frame.indent}px`,
+    // A list hangs its wrapped lines under the item text, and the tab after
+    // each marker reaches it, matching layoutStyledText on export.
+    ...(frame.hang > 0
+      ? {
+          paddingLeft: `${frame.hang}px`,
+          textIndent: `${-frame.hang}px each-line`,
+          tabSize: `${frame.hang}px`,
+        }
+      : { textIndent: `${frame.indent}px` }),
     fontSize: `${fontSize}px`,
     lineHeight: `${frame.lineHeight}px`,
     fontFamily: face.fontFamily,

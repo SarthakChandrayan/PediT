@@ -537,6 +537,7 @@ function sameBlock(left: TextEdit['block'], right: TextEdit['block']): boolean {
     left.lineHeight === right.lineHeight &&
     left.fontSize === right.fontSize &&
     left.indent === right.indent &&
+    (left.hang ?? 0) === (right.hang ?? 0) &&
     left.members.length === right.members.length &&
     left.styles.length === right.styles.length &&
     left.styles.every((style, index) => sameAppearance(style, right.styles[index]))

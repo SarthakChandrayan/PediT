@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   groupTextBlocks,
+  layoutStyledText,
   wrapParagraphText,
   wrapStyledText,
   type BlockRunInput,
@@ -173,5 +174,67 @@ describe('wrapParagraphText', () => {
 
   it('splits a word longer than the line, even after other words', () => {
     expect(wrapParagraphText('ab cdefghij', 4, 0, measure)).toEqual(['ab', 'cdef', 'ghij'])
+  })
+})
+
+describe('bulleted lists', () => {
+  // Geometry from a real resume: "•" and a 16.66pt tab space in a symbol
+  // font, then the item text in the body font.
+  const text = (str: string, x: number, baseline: number, width: number) => ({
+    ...run(str, x, baseline, width, 10.8),
+    fontKey: 'body',
+  })
+  const item = (str: string, baseline: number, width: number) => [
+    { ...run('•', 43.25, baseline, 4.97, 10.8), fontKey: 'symbol' },
+    { ...run(' ', 48.22, baseline, 16.66, 10.8), fontKey: 'symbol' },
+    text(str, 64.88, baseline, width),
+  ]
+
+  it('keeps the marker gap as a tab and hangs wrapped lines under the text', () => {
+    const blocks = groupTextBlocks([
+      ...item('Fixed production', 656.28, 470),
+      text('issues.', 64.88, 640.08, 30),
+      ...item('Created flow diagrams.', 623.88, 300),
+    ])
+    expect(blocks).toHaveLength(1)
+    const block = blocks[0]!
+    expect(block.text).toBe('•\tFixed production issues.\n•\tCreated flow diagrams.')
+    expect(block.left).toBe(43.25)
+    expect(block.hang).toBeCloseTo(21.63)
+    expect(block.indent).toBe(0)
+  })
+
+  it('treats the gap as a space when lines do not hang under the text', () => {
+    const blocks = groupTextBlocks([
+      ...item('Fixed production', 656.28, 470),
+      text('issues.', 43.25, 640.08, 30),
+    ])
+    expect(blocks[0]!.text).toBe('• Fixed production issues.')
+    expect(blocks[0]!.hang).toBe(0)
+  })
+})
+
+describe('layoutStyledText', () => {
+  const measure = (value: string) => value.length
+
+  it('moves past a tab to the hang and wraps under it', () => {
+    const lines = layoutStyledText([{ text: '•\taaa bbb\n•\tccc', style: 0 }], 10, 0, measure, 3)
+    expect(lines).toEqual([
+      [
+        { text: '•', style: 0, x: 0 },
+        { text: 'aaa bbb', style: 0, x: 3 },
+      ],
+      [
+        { text: '•', style: 0, x: 0 },
+        { text: 'ccc', style: 0, x: 3 },
+      ],
+    ])
+    expect(layoutStyledText([{ text: '•\taaa bbb', style: 0 }], 8, 0, measure, 3)).toEqual([
+      [
+        { text: '•', style: 0, x: 0 },
+        { text: 'aaa', style: 0, x: 3 },
+      ],
+      [{ text: 'bbb', style: 0, x: 3 }],
+    ])
   })
 })

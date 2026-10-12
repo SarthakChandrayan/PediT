@@ -36,7 +36,7 @@ import type {
   TextRunAppearance,
   TextSegment,
 } from './textEdits.ts'
-import { BLOCK_WRAP_SLACK, wrapStyledText } from './textBlocks.ts'
+import { BLOCK_WRAP_SLACK, layoutStyledText } from './textBlocks.ts'
 import type { Region } from './contentStream.ts'
 import { removeOriginalText } from './textRemoval.ts'
 import { reflowPage, type ReflowRequest } from './reflow.ts'
@@ -376,11 +376,12 @@ function applyBlockEdit(
     const font = fontOf(style)
     return font.widthOfTextAtSize(textForStandardFont(font, value), fontSize) * scale
   }
-  const lines = wrapStyledText(
+  const lines = layoutStyledText(
     segments,
     block.width * BLOCK_WRAP_SLACK + 0.5,
     block.indent,
     measure,
+    block.hang ?? 0,
   )
 
   const draw = () => {
@@ -393,21 +394,19 @@ function applyBlockEdit(
       setTextRise(0),
     )
     lines.forEach((line, index) => {
-      let x = block.left + (index === 0 ? block.indent : 0)
       const y = block.firstBaseline - index * block.lineHeight
       for (const piece of line) {
         const font = fontOf(piece.style)
         const text = textForStandardFont(font, piece.text)
         if (text.trim().length > 0) {
           page.drawText(text, {
-            x,
+            x: block.left + piece.x,
             y,
             size: fontSize,
             font,
             color: appearanceColor(styles[piece.style] ?? edit.appearance),
           })
         }
-        x += measure(piece.text, piece.style)
       }
     })
     page.pushOperators(popGraphicsState())

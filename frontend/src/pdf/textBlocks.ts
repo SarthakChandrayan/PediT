@@ -52,6 +52,12 @@ export type TextBlock = {
   fontSize: number
   /** First-line indent relative to `left`, never negative. */
   indent: number
+  /**
+   * For a list ("•", "1.") whose items start with a marker, a tab gap and the
+   * item text: where the item text starts, relative to `left`. Each marker is
+   * followed by "\t" in `text`, and wrapped lines start here. 0 otherwise.
+   */
+  hang: number
 }
 
 /** Wrap width multiplier so text that filled the original line still fits. */
@@ -142,6 +148,11 @@ function makeLine(runs: BlockRunInput[]): WorkingLine {
     previous = run
   }
   const first = runs[0]!
+  // A list marker is often drawn in a symbol font; the item text's font is
+  // what its wrapped lines continue in.
+  const content = LIST_MARKER.test(first.str.trim())
+    ? runs.find((run) => run !== first && run.str.trim().length > 0)
+    : undefined
   return {
     runIds: runs.map((run) => run.id),
     runs,
@@ -149,7 +160,7 @@ function makeLine(runs: BlockRunInput[]): WorkingLine {
     right,
     baseline: median(runs.map((run) => run.baseline)),
     fontSize: median(runs.map((run) => run.fontSize)),
-    fontKey: first.fontKey,
+    fontKey: (content ?? first).fontKey,
     text: text.replace(/\s+$/, ''),
   }
 }
@@ -219,11 +230,17 @@ function continuesParagraph(group: WorkingLine[], line: WorkingLine): boolean {
       return false
     }
   }
-  const left = Math.min(...group.slice(group.length > 1 ? 1 : 0).map((item) => item.left))
+  // A list's items start at its marker column, and wrapped lines sit under
+  // the item text.
+  const listItem = listContentStart(group[0]!, size)
+  const left = listItem
+    ? group[0]!.left
+    : Math.min(...group.slice(group.length > 1 ? 1 : 0).map((item) => item.left))
   const right = Math.max(...group.map((item) => item.right))
   // Same column: aligned left edge (allowing a first-line indent) and overlap.
   const aligned =
     Math.abs(line.left - left) <= 1.5 * size ||
+    (listItem !== null && Math.abs(line.left - listItem.x) <= 0.3 * size) ||
     (group.length === 1 && line.left < last.left && last.left - line.left <= 4 * size)
   return aligned && line.left < right && line.right > left
 }
@@ -248,18 +265,45 @@ function toBlock(group: WorkingLine[]): TextBlock {
       last.text += value
     }
   }
+  // A list keeps its marker-to-text gap as a tab stop and its wrapped lines
+  // under the item text, instead of collapsing both to the marker's column.
+  const tolerance = 0.3 * fontSize
+  const itemStarts: number[] = []
+  const wrapLefts: number[] = []
+  let listShape = true
   group.forEach((line, lineIndex) => {
+    let startsParagraph = lineIndex === 0
     if (lineIndex > 0) {
-      append(lineBreak(group[lineIndex - 1]!, line, right, width, fontSize, text))
+      const separator = lineBreak(group[lineIndex - 1]!, line, right, width, fontSize, text)
+      startsParagraph = separator === '\n'
+      append(separator)
+    }
+    const content = startsParagraph ? listContentStart(line, fontSize) : null
+    if (startsParagraph) {
+      if (content === null || Math.abs(line.left - left) > tolerance) {
+        listShape = false
+      } else {
+        itemStarts.push(content.x - left)
+      }
+    } else {
+      wrapLefts.push(line.left - left)
     }
     let previous: BlockRunInput | null = null
-    for (const run of line.runs) {
-      if (previous && needsSpace(previous, run, text)) {
+    for (const [runIndex, run] of line.runs.entries()) {
+      const gapRun = content !== null && runIndex > 0 && runIndex < content.index
+      if (content !== null && runIndex === content.index) {
+        // The marker's own segment carries the tab when no gap run does.
+        if (!/\t$/.test(text)) {
+          append('\t')
+        }
+      } else if (!gapRun && previous && needsSpace(previous, run, text)) {
         append(' ')
       }
       runOffsets[run.id] = text.length
-      text += run.str
-      segments.push({ runId: run.id, text: run.str })
+      // Whitespace runs between marker and text become one tab.
+      const value = gapRun ? (/\t$/.test(text) ? '' : '\t') : run.str
+      text += value
+      segments.push({ runId: run.id, text: value })
       previous = run
     }
     // Drop trailing spaces at the end of the line from both views.
@@ -273,6 +317,19 @@ function toBlock(group: WorkingLine[]): TextBlock {
       excess -= cut
     }
   })
+
+  const hang = itemStarts.length > 0 ? median(itemStarts) : 0
+  const isList =
+    listShape &&
+    hang > 0 &&
+    [...itemStarts, ...wrapLefts].every((start) => Math.abs(start - hang) <= tolerance)
+  if (!isList) {
+    // Not a clean list: the gap reads as an ordinary space, as before.
+    text = text.replace(/\t/g, ' ')
+    for (const segment of segments) {
+      segment.text = segment.text.replace(/\t/g, ' ')
+    }
+  }
 
   return {
     id: `block:${first.runIds[0]}`,
@@ -293,8 +350,31 @@ function toBlock(group: WorkingLine[]): TextBlock {
     lastBaseline: last.baseline,
     lineHeight,
     fontSize,
-    indent: Math.max(0, first.left - left),
+    indent: isList ? 0 : Math.max(0, first.left - left),
+    hang: isList ? hang : 0,
   }
+}
+
+const LIST_MARKER = /^([•·◦▪▫●○■□‣⁃∙➢➤►▸✓✔*\-–—]|\(?\d{1,3}[.)]|\(?[a-z][.)])$/i
+
+/**
+ * When a line opens with a list marker run set apart from its text, the index
+ * of the first text run and where it starts.
+ */
+function listContentStart(
+  line: WorkingLine,
+  fontSize: number,
+): { index: number; x: number } | null {
+  const marker = line.runs[0]
+  if (!marker || !LIST_MARKER.test(marker.str.trim())) {
+    return null
+  }
+  const index = line.runs.findIndex((run, runIndex) => runIndex > 0 && run.str.trim().length > 0)
+  const content = line.runs[index]
+  if (!content || content.x - (marker.x + marker.width) < WORD_GAP * fontSize) {
+    return null
+  }
+  return { index, x: content.x }
 }
 
 /**
@@ -351,8 +431,43 @@ export function wrapStyledText(
   width: number,
   firstLineIndent: number,
   measure: (text: string, style: number) => number,
+  hang = 0,
 ): StyledPiece[][] {
-  type Char = { char: string; style: number }
+  return wrapChars(pieces, width, firstLineIndent, measure, hang).map(({ chars }) =>
+    mergePieces(chars),
+  )
+}
+
+/** A piece placed on its line; `x` is from the paragraph's left edge. */
+export type PlacedPiece = StyledPiece & { x: number }
+
+/**
+ * `wrapStyledText` with each piece positioned. With a `hang`, a "\t" moves
+ * to the next multiple of it and lines wrapped inside a paragraph start at
+ * it, as CSS lays out `tab-size` with a hanging `text-indent`. Tabs are not
+ * part of the returned text.
+ */
+export function layoutStyledText(
+  pieces: readonly StyledPiece[],
+  width: number,
+  firstLineIndent: number,
+  measure: (text: string, style: number) => number,
+  hang = 0,
+): PlacedPiece[][] {
+  return wrapChars(pieces, width, firstLineIndent, measure, hang).map(
+    ({ chars, start }) => placeChars(chars, start, measure, hang).pieces,
+  )
+}
+
+type Char = { char: string; style: number }
+
+function wrapChars(
+  pieces: readonly StyledPiece[],
+  width: number,
+  firstLineIndent: number,
+  measure: (text: string, style: number) => number,
+  hang: number,
+): { chars: Char[]; start: number }[] {
   const chars: Char[] = []
   for (const piece of pieces) {
     for (const char of piece.text) {
@@ -360,9 +475,14 @@ export function wrapStyledText(
     }
   }
 
-  const lines: Char[][] = []
-  const available = () => width - (lines.length === 0 ? firstLineIndent : 0)
-  const widthOf = (items: readonly Char[]) => measureChars(items, measure)
+  const lines: { chars: Char[]; start: number }[] = []
+  let lineStart = firstLineIndent
+  const fits = (items: readonly Char[]) =>
+    placeChars(items, lineStart, measure, hang).end <= width
+  const pushLine = (items: Char[]) => {
+    lines.push({ chars: items, start: lineStart })
+    lineStart = hang
+  }
 
   let paragraph: Char[] = []
   const paragraphs: Char[][] = []
@@ -401,40 +521,64 @@ export function wrapStyledText(
     for (const entry of words) {
       if (current.length > 0) {
         const candidate = [...current, ...entry.space, ...entry.word]
-        if (widthOf(candidate) <= available()) {
+        if (fits(candidate)) {
           current = candidate
           continue
         }
-        lines.push(current)
+        pushLine(current)
         current = []
       }
       // Leading spaces only survive at the start of a paragraph.
       const lead = current.length === 0 && entry === words[0] ? entry.space : []
       const start = [...lead, ...entry.word]
-      if (widthOf(start) <= available() || entry.word.length <= 1) {
+      if (fits(start) || entry.word.length <= 1) {
         current = start
         continue
       }
       // Split an over-long word so it never runs past the paragraph edge.
       for (const item of start) {
-        if (current.length > 0 && widthOf([...current, item]) > available()) {
-          lines.push(current)
+        if (current.length > 0 && !fits([...current, item])) {
+          pushLine(current)
           current = []
         }
         current.push(item)
       }
     }
-    lines.push(current)
+    pushLine(current)
+    // Every paragraph after a hard break starts at the left edge again.
+    lineStart = 0
   }
 
-  return lines.map((line) => mergePieces(line))
+  return lines
 }
 
-function measureChars(
-  items: readonly { char: string; style: number }[],
+/** Positions `items` from `start`, honouring tab stops every `hang`. */
+function placeChars(
+  items: readonly Char[],
+  start: number,
   measure: (text: string, style: number) => number,
-): number {
-  return mergePieces(items).reduce((total, piece) => total + measure(piece.text, piece.style), 0)
+  hang: number,
+): { pieces: PlacedPiece[]; end: number } {
+  const pieces: PlacedPiece[] = []
+  let x = start
+  let pending: Char[] = []
+  const flush = () => {
+    for (const piece of mergePieces(pending)) {
+      pieces.push({ ...piece, x })
+      x += measure(piece.text, piece.style)
+    }
+    pending = []
+  }
+  for (const item of items) {
+    if (item.char !== '\t') {
+      pending.push(item)
+      continue
+    }
+    flush()
+    x = hang > 0 ? (Math.floor(x / hang + 1e-6) + 1) * hang : x + measure(' ', item.style)
+  }
+  flush()
+  return { pieces, end: x }
 }
 
 function mergePieces(items: readonly { char: string; style: number }[]): StyledPiece[] {

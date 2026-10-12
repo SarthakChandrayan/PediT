@@ -50,6 +50,8 @@ export type TextBlockLayout = {
   lineHeight: number
   fontSize: number
   indent: number
+  /** List text start and tab stop, relative to `left`; see TextBlock.hang. */
+  hang?: number
   members: readonly TextBlockMember[]
   /** Distinct text styles in the paragraph, in first-seen order. */
   styles: readonly TextRunAppearance[]
